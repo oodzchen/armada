@@ -16,4 +16,9 @@ struct opd_ufs_io {
  * -1=hardware was modified and cannot safely return directly to Android.
  */
 int opd2413_ufs_nop(const struct opd_ufs_io *io, volatile void *dma);
+/* Shared exact-state guard and DME_GET link check for DMA experiments.
+ * 0=ready (saved[] = UTRLBA, UTRLBA_HI, UTRLRSR), 1=skipped with no writes
+ * beyond link-check diagnostics, -1=uncertain.
+ */
+int opd2413_ufs_preflight(const struct opd_ufs_io *io, const char *tag, uint32_t saved[3]);
 #endif

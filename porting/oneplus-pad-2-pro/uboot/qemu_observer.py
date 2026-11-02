@@ -78,7 +78,7 @@ mark:
     b 1b
 """
 
-def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=False, ufs_nop=False, ufs_link=False):
+def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=False, ufs_nop=False, ufs_link=False, ufs_read=False):
     out.mkdir(parents=True, exist_ok=True)
     (out/'entry.S').write_text(ENTRY + (DROP_EL1 if el==1 else '    ldr x4, =0xb9000000\n    br x4\n'))
     subprocess.run(['aarch64-linux-gnu-gcc','-nostdlib','-static','-Wl,--build-id=none',
@@ -171,6 +171,11 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
                 if ufs_link:
                     assert b'UFS_LINK skipped:' in text
                     assert b'UFS_LINK_FAIL' not in text
+                if ufs_read:
+                    assert b'UFS_READ skipped:' in text
+                    assert b'UFS_READ_PASS' not in text
+                    assert b'UFS_READ_FAIL' not in text
+                    assert b'UFS_READ DMA=' not in text
                 if handoff:
                     qmp('pmemsave',{'val':0xb91ff000,'size':4,'filename':str(out/'handoff.bin')})
                     marker=int.from_bytes((out/'handoff.bin').read_bytes(),'little')
@@ -201,9 +206,11 @@ def main():
     ap.add_argument('--smmu-snapshot', action='store_true', help='Check safe handling of the absent SMMUv2 (requires --ufs-snapshot)')
     ap.add_argument('--ufs-nop', action='store_true', help='Check NOP preflight refuses the fake/absent hardware (requires --smmu-snapshot)')
     ap.add_argument('--ufs-link-check', action='store_true', help='Check link-state preflight refuses the fake/absent hardware')
+    ap.add_argument('--ufs-read', action='store_true', help='Check the read-only survey preflight refuses the fake/absent hardware (requires --smmu-snapshot)')
     a=ap.parse_args()
     if a.smmu_snapshot and not a.ufs_snapshot:ap.error('--smmu-snapshot requires --ufs-snapshot')
     if a.ufs_nop and not a.smmu_snapshot:ap.error('--ufs-nop requires --smmu-snapshot')
-    for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff,a.ufs_snapshot,a.smmu_snapshot,a.ufs_nop,a.ufs_link_check)
+    if a.ufs_read and not a.smmu_snapshot:ap.error('--ufs-read requires --smmu-snapshot')
+    for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff,a.ufs_snapshot,a.smmu_snapshot,a.ufs_nop,a.ufs_link_check,a.ufs_read)
 
 if __name__=='__main__':main()

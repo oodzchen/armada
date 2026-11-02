@@ -41,6 +41,8 @@ def main():
                            ('ufs_nop.h', mach/'opd2413_ufs_nop.h'),
                            ('ufs_link.c', mach/'opd2413_ufs_link.c'),
                            ('ufs_link.h', mach/'opd2413_ufs_link.h'),
+                           ('ufs_read.c', mach/'opd2413_ufs_read.c'),
+                           ('ufs_read.h', mach/'opd2413_ufs_read.h'),
                            ('serial_ramconsole.c', root/'drivers/serial/serial_opd2413_ramconsole.c'),
                            ('ramconsole_format.h', root/'drivers/serial/opd2413_ramconsole_format.h'),
                            ('observer_defconfig', root/'configs/opd2413_observer_defconfig'),
@@ -71,6 +73,11 @@ def main():
     insert_before(mach/'Makefile', 'obj-y += dram.o', nop_new)
     insert_before(mach/'Makefile', 'obj-y += dram.o',
                   'obj-$(CONFIG_OPD2413_UFS_LINK_CHECK) += opd2413_ufs_link.o\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_UFS_READ\n\tbool "Read-only UFS LUN/capacity/GPT survey on the ABL link"\n'
+                  '\tdepends on OPD2413_SMMU_SNAPSHOT && !OPD2413_UFS_NOP && !OPD2413_UFS_LINK_CHECK\n\tdefault n\n\n')
+    insert_before(mach/'Makefile', 'obj-y += dram.o',
+                  'obj-$(CONFIG_OPD2413_UFS_READ) += opd2413_ufs_read.o opd2413_ufs_nop.o opd2413_ufs_link.o\n')
     replace_once(root/'drivers/serial/Makefile', 'obj-$(CONFIG_SANDBOX_SERIAL)', 'obj-$(CONFIG_OPD2413_OBSERVER) += serial_opd2413_ramconsole.o\nobj-$(CONFIG_SANDBOX_SERIAL)')
     replace_once(mach/'qcom-priv.h', 'int qcom_parse_memory(', 'int opd2413_observer_fdt(void **out);\nvoid opd2413_observer_map(void);\nint opd2413_observer_late(void);\n\nint qcom_parse_memory(')
     replace_once(mach/'board.c', 'int board_fdt_blob_setup(void **fdtp)\n{', 'int board_fdt_blob_setup(void **fdtp)\n{\n\tif (IS_ENABLED(CONFIG_OPD2413_OBSERVER)) return opd2413_observer_fdt(fdtp);')

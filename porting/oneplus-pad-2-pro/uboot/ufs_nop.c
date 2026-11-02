@@ -46,12 +46,8 @@ static int wait_host(const struct opd_ufs_io *io, unsigned off, uint32_t value)
 	return -1;
 }
 
-int opd2413_ufs_nop(const struct opd_ufs_io *io, volatile void *dma)
+int opd2413_ufs_preflight(const struct opd_ufs_io *io, const char *tag, uint32_t saved[3])
 {
-	volatile uint32_t *utrd = dma;
-	volatile unsigned char *ucd = (volatile unsigned char *)dma + 0x1000;
-	uint32_t old_base, old_high, old_run;
-	printf("OPD2413_UFS_NOP_BEGIN\n");
 	uint32_t ahb = io->read32(OPD_GCC_UFS_BASE + 0x28, io->ctx);
 	/* Intentionally restricted to the exact handoff observed on this unit.
 	 * An unexpected state causes no writes, even if it might also be usable.
@@ -71,20 +67,32 @@ int opd2413_ufs_nop(const struct opd_ufs_io *io, volatile void *dma)
 	    smmu(io, 0x80000) != 0x0a9f00e0 ||
 	    smmu(io, 0x80020) || smmu(io, 0x80024) ||
 	    smmu(io, 0x80028) || smmu(io, 0x8002c) || smmu(io, 0x80030)) {
-		printf("UFS_NOP skipped: unexpected active-link or identity-DMA state\n");
+		printf("%s skipped: unexpected active-link or identity-DMA state\n", tag);
 		return 1;
 	}
-	old_base = host(io, UTRLBA); old_high = host(io, UTRLBA_HI); old_run = host(io, RSR);
-	if (old_run != 1 || !old_base || (old_base & 0x3ff)) {
-		printf("UFS_NOP skipped: unexpected original transfer queue\n");
+	saved[0] = host(io, UTRLBA); saved[1] = host(io, UTRLBA_HI); saved[2] = host(io, RSR);
+	if (saved[2] != 1 || !saved[0] || (saved[0] & 0x3ff)) {
+		printf("%s skipped: unexpected original transfer queue\n", tag);
 		return 1;
 	}
 	uint32_t states[3] = {0xffffffffU, 0xffffffffU, 0xffffffffU};
 	int ret = opd2413_ufs_link_check(io, states);
 	if (ret) return ret;
 	if (states[0] != 1 || states[1] != 1 || states[2] != 0x11) {
-		printf("UFS_NOP skipped: unexpected initial link state\n"); return 1;
+		printf("%s skipped: unexpected initial link state\n", tag); return 1;
 	}
+	return 0;
+}
+
+int opd2413_ufs_nop(const struct opd_ufs_io *io, volatile void *dma)
+{
+	volatile uint32_t *utrd = dma;
+	volatile unsigned char *ucd = (volatile unsigned char *)dma + 0x1000;
+	uint32_t saved[3], old_base, old_high, old_run;
+	printf("OPD2413_UFS_NOP_BEGIN\n");
+	int ret = opd2413_ufs_preflight(io, "UFS_NOP", saved);
+	if (ret) return ret;
+	old_base = saved[0]; old_high = saved[1]; old_run = saved[2];
 	ret = opd2413_ufs_hibern8(io, 0);
 	if (ret) return ret;
 	/* The dedicated low RAM window is mapped Normal-NC, with no WB alias.
