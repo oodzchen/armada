@@ -27,6 +27,7 @@ case "$model" in
     "AYANEO Pocket S2") profile=ayaneo-pocket-s2 ;;
     "KONKR Pocket FIT") profile=konkr-pocket-fit ;;
     "KONKR Pocket FIT Elite") profile=konkr-pocket-fit-elite ;;
+    "OnePlus Pad 2 Pro"|"Qualcomm Technologies, Inc. Sun MTP,erhai-O DVT") profile=oneplus-pad-2-pro ;;
     "AYN Odin 3") profile=ayn-odin-3 ;;
     "Retroid Pocket 5") profile=retroid-pocket-5 ;;
     "Retroid Pocket 5 Visionox") profile=retroid-pocket-5-visionox ;;
@@ -115,6 +116,7 @@ vars=(
     ARMADA_DEVICE_ID
     ARMADA_DEVICE_NAME
     ARMADA_SOC_CLASS
+    ARMADA_ABL_MANAGED
     ARMADA_PROTON_DEFAULTS
     ARMADA_SUSPEND_MODE
     ARMADA_SYNC_SUSPEND

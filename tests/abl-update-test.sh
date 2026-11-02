@@ -146,6 +146,27 @@ PY
 LOADER_INFO=LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 SETTINGS=SettingsSchema-8c5f2b7e-3a41-4d6c-9e2f-5b7a1c0d4e93
 
+# A hardware opt-out wins even when the installed ABL is eligible for update.
+install_both "$rocknix"
+before=$(cat "$ABL_A" "$ABL_B" | sha256sum)
+out=$(ARMADA_ABL_MANAGED=0 run_update)
+assert_contains "$out" "OEM ABL is unmanaged"
+[[ ! -s "$WORK/writes" ]] || fail "unmanaged ABL was written"
+[[ "$(cat "$ABL_A" "$ABL_B" | sha256sum)" == "$before" ]] || fail "unmanaged ABL changed"
+(
+    # A missing flag must never enable OpenABL on this known OEM-signed device.
+    base_env+=(ARMADA_ABL_DEVICE_ID=oneplus-pad-2-pro ARMADA_ABL_SOC=SM8750)
+    out=$(ARMADA_ABL_MANAGED=1 run_update)
+    assert_contains "$out" "OEM ABL is unmanaged"
+)
+[[ ! -s "$WORK/writes" ]] || fail "OnePlus ABL was written"
+for model in 'OnePlus Pad 2 Pro' 'Qualcomm Technologies, Inc. Sun MTP,erhai-O DVT'; do
+    settings=$(ARMADA_MODEL="$model" ARMADA_DEVICE_DIR="$ROOT/system_files/usr/lib/armada/devices" \
+        ARMADA_SLEEP_CONFIG=/dev/null "$ROOT/system_files/usr/libexec/armada/device-env")
+    assert_contains "$settings" 'ARMADA_DEVICE_ID=oneplus-pad-2-pro'
+    assert_contains "$settings" 'ARMADA_ABL_MANAGED=0'
+done
+
 # socinfo must confirm the configured SoC before anything is written.
 install_both "$rocknix"
 echo 682 > "$SOC_ID"
@@ -355,12 +376,26 @@ cat > "$FROOT/updater" <<'EOF'
 printf '%s\n' "$*" >> "$ARMADA_FINALIZE_LOG"
 EOF
 chmod +x "$FROOT/updater"
+cat > "$FROOT/device-env" <<'EOF'
+#!/usr/bin/env bash
+printf 'ARMADA_ABL_MANAGED=%s\n' "${ARMADA_TEST_MANAGED:-1}"
+printf 'ARMADA_DEVICE_ID=%s\n' "${ARMADA_TEST_DEVICE:-ayn-odin-2}"
+EOF
+chmod +x "$FROOT/device-env"
 finalize_env=(BOOTROOT="$FBOOT" SYSROOT="$FSYS"
     ARGS_FILE="$ROOT/system_files/usr/lib/armada/bootimg-args"
+    ARMADA_DEVICE_ENV="$FROOT/device-env"
     UPDATER="$FROOT/updater" ARMADA_FINALIZE_LOG="$FROOT/finalize-log")
 env "${finalize_env[@]}" "$FINALIZE"
 assert_contains "$(cat "$FROOT/finalize-log")" \
     "--target-root $FSYS/ostree/deploy/target"
+
+# The finalizer must not invoke even an injected writer on unmanaged hardware.
+: > "$FROOT/finalize-log"
+env "${finalize_env[@]}" ARMADA_TEST_MANAGED=0 "$FINALIZE"
+[[ ! -s "$FROOT/finalize-log" ]] || fail "unmanaged finalizer invoked writer"
+env "${finalize_env[@]}" ARMADA_TEST_DEVICE=oneplus-pad-2-pro "$FINALIZE"
+[[ ! -s "$FROOT/finalize-log" ]] || fail "OnePlus finalizer invoked writer"
 
 # Default deployments remain eligible so bridge releases catch up on shutdown.
 ln -s ostree/deploy/target "$FSYS/target-link"

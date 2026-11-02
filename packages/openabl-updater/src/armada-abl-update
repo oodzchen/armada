@@ -28,7 +28,6 @@ abl_identity() {
     ARMADA_ABL_RELEASES="${abl_releases}" python3 "${ABL_VERSION_TOOL}" --with-soc "$1"
 }
 
-[ -r "${manifest}" ] || { echo "armada-abl-update: target has no ABL manifest" >&2; exit 7; }
 testing=${ARMADA_ABL_TESTING:-0}
 if [ "${testing}" = 1 ]; then
     device_id=${ARMADA_ABL_DEVICE_ID:?test device id required}
@@ -38,6 +37,13 @@ else
     device_id=${ARMADA_DEVICE_ID:-}
     soc=${ARMADA_SOC_CLASS:-}
 fi
+# This is a hardware policy, independent of payload hashes and SoC support.
+# OnePlus uses an OEM-signed ABL even though its SoC also appears in handhelds.
+if [ "${ARMADA_ABL_MANAGED:-1}" = 0 ] || [ "${device_id}" = oneplus-pad-2-pro ]; then
+    echo "armada-abl-update: OEM ABL is unmanaged; leaving it untouched"
+    exit 0
+fi
+[ -r "${manifest}" ] || { echo "armada-abl-update: target has no ABL manifest" >&2; exit 7; }
 [ -n "${device_id}" ] && [ "${device_id}" != unknown ] || {
     echo "armada-abl-update: device is not recognized by Armada" >&2; exit 7;
 }

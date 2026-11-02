@@ -6,6 +6,15 @@ BOOTROOT=${BOOTROOT:-/boot}
 SYSROOT=${SYSROOT:-/}
 ARGS_FILE=${ARGS_FILE:-/usr/lib/armada/bootimg-args}
 UPDATER=${UPDATER:-/usr/libexec/openabl-updater/armada-abl-update}
+DEVICE_ENV=${ARMADA_DEVICE_ENV:-/usr/libexec/armada/device-env}
+
+# Check the running hardware before inspecting a deployment or invoking a writer.
+device_settings=$("${DEVICE_ENV}") || exit 0
+eval "${device_settings}"
+if [ "${ARMADA_ABL_MANAGED:-1}" = 0 ] || [ "${ARMADA_DEVICE_ID:-}" = oneplus-pad-2-pro ]; then
+    echo "armada-abl-finalize: OEM ABL is unmanaged; leaving it untouched"
+    exit 0
+fi
 
 . "${ARGS_FILE}"
 entry=$(armada_default_bls_entry "${BOOTROOT}")
