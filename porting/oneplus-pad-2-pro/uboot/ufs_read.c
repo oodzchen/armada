@@ -33,6 +33,9 @@ enum { CMD_OK = 0, CMD_STATUS = 1, CMD_FAILED = -1, CMD_REFUSED = 2 };
 
 /* Last submitted command, for the failure summary. */
 static uint8_t last_cdb = 0xff, last_lun = 0xff;
+/* START STOP UNIT is accepted only during an OPD_UFS_WAKE survey. */
+static int wake_enabled;
+#define DEVICE_WLUN 0xd0
 
 struct cmd_result {
 	uint8_t status, sense_key, asc, ascq;
@@ -84,6 +87,23 @@ int opd2413_ufs_read_allowed(const uint8_t *cdb, unsigned cdb_len, uint32_t xfer
 	}
 }
 
+int opd2413_ufs_ssu_allowed(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, uint32_t xfer)
+{
+	return cdb && lun == DEVICE_WLUN && cdb_len == 6 && !xfer && cdb[0] == 0x1b &&
+	       !cdb[1] && !cdb[2] && !cdb[3] && !cdb[5] &&
+	       (cdb[4] == 0x10 || cdb[4] == 0x20 || cdb[4] == 0x30);
+}
+
+int opd2413_ufs_query_allowed(uint8_t function, uint8_t opcode, uint16_t length)
+{
+	if (function != 0x01) return 0; /* STANDARD READ REQUEST */
+	switch (opcode) {
+	case 0x01: return length && length <= 0xff; /* READ DESCRIPTOR */
+	case 0x03: case 0x05: return !length;      /* READ ATTRIBUTE / FLAG */
+	default: return 0;
+	}
+}
+
 static uint32_t host(const struct opd_ufs_io *io, unsigned off)
 {
 	return io->read32(OPD_UFS_BASE + off, io->ctx);
@@ -97,13 +117,17 @@ static void write_host(const struct opd_ufs_io *io, unsigned off, uint32_t value
 	io->write32(OPD_UFS_BASE + off, value, io->ctx);
 	io->sync_io(io->ctx);
 }
-static int wait_host(const struct opd_ufs_io *io, unsigned off, uint32_t value)
+static int wait_host_n(const struct opd_ufs_io *io, unsigned off, uint32_t value, unsigned polls)
 {
-	for (unsigned i = 0; i < 10000; ++i) {
+	for (unsigned i = 0; i < polls; ++i) {
 		if (host(io, off) == value) return 0;
 		io->delay_us(50, io->ctx);
 	}
 	return -1;
+}
+static int wait_host(const struct opd_ufs_io *io, unsigned off, uint32_t value)
+{
+	return wait_host_n(io, off, value, 10000);
 }
 
 /* One command in slot 0. Data, if any, lands at dma + DATA. */
@@ -111,7 +135,8 @@ static int submit(const struct opd_ufs_io *io, volatile uint8_t *dma, uint8_t lu
 		  const uint8_t *cdb, unsigned cdb_len, uint32_t xfer, struct cmd_result *r)
 {
 	volatile uint32_t *utrd = (volatile uint32_t *)dma;
-	if (!opd2413_ufs_read_allowed(cdb, cdb_len, xfer) || cdb_len > 16) {
+	if (cdb_len > 16 || !(opd2413_ufs_read_allowed(cdb, cdb_len, xfer) ||
+			      (wake_enabled && opd2413_ufs_ssu_allowed(lun, cdb, cdb_len, xfer)))) {
 		printf("UFS_READ refused CDB %02x len %u xfer %u\n", cdb[0], cdb_len, xfer);
 		return CMD_REFUSED;
 	}
@@ -138,7 +163,8 @@ static int submit(const struct opd_ufs_io *io, volatile uint8_t *dma, uint8_t lu
 	}
 	io->sync_io(io->ctx);
 	write_host(io, DBR, 1);
-	if (wait_host(io, DBR, 0)) {
+	/* A power-mode change may take far longer than a read: allow 5 s. */
+	if (wait_host_n(io, DBR, 0, cdb[0] == 0x1b ? 100000 : 10000)) {
 		printf("UFS_READ CDB %02x LUN %02x timeout DBR=%08x IS=%08x\n", cdb[0], lun,
 		       host(io, DBR), host(io, IS));
 		return CMD_FAILED;
@@ -156,10 +182,13 @@ static int submit(const struct opd_ufs_io *io, volatile uint8_t *dma, uint8_t lu
 		/* Target Failure: the device refused the command, but the transfer
 		 * completed normally (OCS, doorbell and completion as expected), so
 		 * the controller state stays known. Record the raw UPIU. */
-		printf("UFS_READ CDB %02x LUN %02x target failure resp=%02x status=%02x UPIU:", cdb[0], lun, rsp[6], rsp[7]);
+		r->status = rsp[7] ? rsp[7] : 0xff; r->residual = 0; r->sense_key = r->asc = r->ascq = 0;
+		uint32_t len = (uint32_t)rsp[32] << 8 | rsp[33];
+		if (rsp[7] == 2 && len >= 14) { r->sense_key = rsp[36] & 0xf; r->asc = rsp[46]; r->ascq = rsp[47]; }
+		printf("UFS_READ CDB %02x LUN %02x target failure resp=%02x status=%02x sense %x/%02x/%02x UPIU:",
+		       cdb[0], lun, rsp[6], rsp[7], r->sense_key, r->asc, r->ascq);
 		for (unsigned i = 0; i < 48; ++i) printf("%s%02x", i % 16 ? "" : " ", rsp[i]);
 		printf("\n");
-		r->status = 0xff; r->residual = 0; r->sense_key = r->asc = r->ascq = 0;
 		return CMD_STATUS;
 	}
 	r->status = rsp[7];
@@ -177,6 +206,87 @@ static int submit(const struct opd_ufs_io *io, volatile uint8_t *dma, uint8_t lu
 		return CMD_STATUS;
 	}
 	return CMD_OK;
+}
+
+/* One QUERY REQUEST (no PRDT; any descriptor returns in the response
+ * UPIU data segment). CMD_OK with *value set, CMD_STATUS for a query
+ * failure response, CMD_FAILED for a transport fault. */
+static int query(const struct opd_ufs_io *io, volatile uint8_t *dma, uint8_t opcode, uint8_t idn,
+		 uint16_t length, uint32_t *value, uint16_t *data_len)
+{
+	volatile uint32_t *utrd = (volatile uint32_t *)dma;
+	if (!opd2413_ufs_query_allowed(0x01, opcode, length)) {
+		printf("UFS_QUERY refused opcode %02x length %u\n", opcode, length);
+		return CMD_REFUSED;
+	}
+	last_cdb = 0x16; last_lun = idn;
+	for (unsigned i = 0; i < DATA; ++i) dma[i] = 0;
+	for (unsigned i = RSP; i < PRDT; ++i) dma[i] = 0xa5;
+	utrd[0] = 0x11000000;
+	utrd[2] = 0xf;
+	utrd[4] = (uint32_t)(OPD_DMA_BASE + UCD);
+	utrd[5] = (uint32_t)((OPD_DMA_BASE + UCD) >> 32);
+	utrd[6] = 0x00800080;
+	utrd[7] = 0x01000000;
+	uint8_t upiu[32] = {0x16, 0, 0, 0, 0, 0x01};
+	upiu[12] = opcode; upiu[13] = idn; upiu[18] = length >> 8; upiu[19] = length;
+	for (unsigned i = 0; i < sizeof(upiu); ++i) dma[UCD + i] = upiu[i];
+	io->sync_io(io->ctx);
+	write_host(io, DBR, 1);
+	if (wait_host(io, DBR, 0)) {
+		printf("UFS_QUERY %02x/%02x timeout DBR=%08x IS=%08x\n", opcode, idn, host(io, DBR), host(io, IS));
+		return CMD_FAILED;
+	}
+	io->sync_io(io->ctx);
+	const volatile uint8_t *rsp = dma + RSP;
+	uint32_t ocs = utrd[2] & 0xff, is = host(io, IS);
+	uint16_t seg = (uint16_t)(rsp[10] << 8 | rsp[11]);
+	if (ocs || rsp[0] != 0x36 || rsp[3] || rsp[12] != opcode || rsp[13] != idn ||
+	    seg > 0x1c0 || (is & UFS_ERRORS) || !(is & 1)) {
+		printf("UFS_QUERY %02x/%02x transport OCS=%02x UPIU=%02x tag=%02x op=%02x idn=%02x seg=%u IS=%08x\n",
+		       opcode, idn, ocs, rsp[0], rsp[3], rsp[12], rsp[13], seg, is);
+		return CMD_FAILED;
+	}
+	write_host(io, IS, 1);
+	if (rsp[6]) {
+		printf("UFS_QUERY %02x/%02x response %02x\n", opcode, idn, rsp[6]);
+		return CMD_STATUS;
+	}
+	if (value) *value = be32(rsp + 20);
+	if (data_len) *data_len = seg;
+	return CMD_OK;
+}
+
+static int read_queries(const struct opd_ufs_io *io, volatile uint8_t *dma, struct opd_ufs_read_result *res)
+{
+	uint32_t v = 0;
+	int ret = query(io, dma, 0x03, 0x02, 0, &v, NULL); /* bCurrentPowerMode */
+	if (ret < 0) return -1;
+	if (!ret) { res->power_mode_ok = 1; res->power_mode = v; }
+	ret = query(io, dma, 0x03, 0x00, 0, &v, NULL); /* bBootLunEn */
+	if (ret < 0) return -1;
+	if (!ret) { res->boot_lun_ok = 1; res->boot_lun = v; }
+	ret = query(io, dma, 0x05, 0x01, 0, &v, NULL); /* fDeviceInit */
+	if (ret < 0) return -1;
+	if (!ret) { res->device_init_ok = 1; res->device_init = v & 1; }
+	uint16_t len = 0;
+	ret = query(io, dma, 0x01, 0x00, 0x40, NULL, &len); /* device descriptor */
+	if (ret < 0) return -1;
+	const volatile uint8_t *d = dma + RSP + 32;
+	if (!ret && len >= 0x1a && d[1] == 0x00) {
+		res->descriptor_ok = 1;
+		res->number_lu = d[6]; res->init_power_mode = d[10];
+		res->spec_version = (uint16_t)(d[16] << 8 | d[17]);
+		res->manufacturer_id = (uint16_t)(d[24] << 8 | d[25]);
+		printf("UFS_QUERY device descriptor %u bytes:", len);
+		for (unsigned i = 0; i < len && i < 0x40; ++i) printf("%s%02x", i % 16 ? "" : " ", d[i]);
+		printf("\n");
+	}
+	printf("UFS_QUERY bCurrentPowerMode=%s%02x bBootLunEn=%s%02x fDeviceInit=%s%u bNumberLU=%u bInitPowerMode=%02x spec=%04x manufacturer=%04x\n",
+	       res->power_mode_ok ? "" : "?", res->power_mode, res->boot_lun_ok ? "" : "?", res->boot_lun,
+	       res->device_init_ok ? "" : "?", res->device_init, res->number_lu, res->init_power_mode,
+	       res->spec_version, res->manufacturer_id);
+	return 0;
 }
 
 /* GOOD, retrying once after UNIT ATTENTION. */
@@ -305,13 +415,29 @@ static int survey_lun(const struct opd_ufs_io *io, volatile uint8_t *dma, struct
 	return 0;
 }
 
+static int ssu(const struct opd_ufs_io *io, volatile uint8_t *dma, uint8_t condition)
+{
+	const uint8_t cdb[6] = {0x1b, 0, 0, 0, (uint8_t)(condition << 4), 0};
+	printf("UFS_WAKE START STOP UNIT power_condition=%u\n", condition);
+	return command(io, dma, DEVICE_WLUN, cdb, sizeof(cdb), 0);
+}
+
 int opd2413_ufs_read_gpt(const struct opd_ufs_io *io, volatile void *window,
 			 struct opd_ufs_read_result *out)
+{
+	return opd2413_ufs_survey(io, window, out, 0);
+}
+
+int opd2413_ufs_survey(const struct opd_ufs_io *io, volatile void *window,
+		       struct opd_ufs_read_result *out, unsigned flags)
 {
 	volatile uint8_t *dma = window;
 	struct opd_ufs_read_result local, *res = out ? out : &local;
 	uint32_t saved[3];
+	uint8_t condition = 0;
 	last_cdb = last_lun = 0xff;
+	wake_enabled = 0;
+	if (flags & ~OPD_UFS_WAKE) return 1;
 	for (size_t i = 0; i < sizeof(*res); ++i) ((uint8_t *)res)[i] = 0;
 	printf("OPD2413_UFS_READ_BEGIN\n");
 	int ret = opd2413_ufs_preflight(io, "UFS_READ", saved);
@@ -329,6 +455,30 @@ int opd2413_ufs_read_gpt(const struct opd_ufs_io *io, volatile void *window,
 	if (host(io, UTRLBA) != OPD_DMA_BASE || host(io, UTRLBA_HI)) goto failed;
 	write_host(io, RSR, 1);
 	if (wait_host(io, RSR, 1)) goto failed;
+
+	if (read_queries(io, dma, res) < 0) goto failed;
+	if (flags & OPD_UFS_WAKE) {
+		if (res->power_mode_ok && (res->power_mode == 0x33 || res->power_mode == 0x22)) {
+			condition = res->power_mode >> 4;
+			wake_enabled = 1;
+			ret = ssu(io, dma, 1);
+			if (ret < 0) goto failed;
+			if (ret) {
+				/* Refused and completed: the device kept its state. */
+				printf("UFS_WAKE refused; survey without waking\n");
+				condition = 0; wake_enabled = 0;
+			} else {
+				uint32_t mode = 0;
+				ret = query(io, dma, 0x03, 0x02, 0, &mode, NULL);
+				if (ret < 0) goto failed;
+				res->woke = 1;
+				printf("UFS_WAKE active bCurrentPowerMode=%s%02x\n", ret ? "?" : "", mode);
+			}
+		} else {
+			printf("UFS_WAKE skipped: power mode %s%02x is not Sleep/PowerDown\n",
+			       res->power_mode_ok ? "" : "?", res->power_mode);
+		}
+	}
 
 	uint8_t luns[OPD_READ_MAX_LUNS];
 	unsigned nluns = 0;
@@ -358,6 +508,20 @@ int opd2413_ufs_read_gpt(const struct opd_ufs_io *io, volatile void *window,
 		if (survey_lun(io, dma, l) < 0) goto failed;
 	}
 
+	if (condition) {
+		/* Back to exactly the power mode ABL left, verified by query. */
+		uint32_t mode = 0;
+		ret = ssu(io, dma, condition);
+		if (ret) goto failed;
+		ret = query(io, dma, 0x03, 0x02, 0, &mode, NULL);
+		if (ret || mode != res->power_mode) {
+			printf("UFS_WAKE restore mismatch bCurrentPowerMode=%02x expected %02x\n", mode, res->power_mode);
+			goto failed;
+		}
+		res->restored_power_mode = (uint8_t)mode;
+		wake_enabled = 0;
+		printf("UFS_WAKE restored bCurrentPowerMode=%02x\n", mode);
+	}
 	/* Every completion was cleared individually. Stop the idle list and
 	 * restore ABL's queue, then its Hibern8 state, exactly as the NOP does. */
 	write_host(io, RSR, 0);
@@ -372,6 +536,7 @@ int opd2413_ufs_read_gpt(const struct opd_ufs_io *io, volatile void *window,
 	printf("OPD2413_UFS_READ_PASS luns=%u original_queue_and_hibern8_restored\n", res->luns);
 	return 0;
 failed:
+	wake_enabled = 0;
 	printf("OPD2413_UFS_READ_FAIL last_cdb=%02x last_lun=%02x luns_done=%u DBR=%08x IS=%08x RSR=%08x; reset required\n",
 	       last_cdb, last_lun, res->luns, host(io, DBR), host(io, IS), host(io, RSR));
 	printf("UFS_READ SMMU GFSR=%08x GFSYNR1=%08x CB0_FSR=%08x FAR=%08x%08x FSYNR0=%08x\n",

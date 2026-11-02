@@ -199,7 +199,8 @@ int opd2413_observer_late(void)
 #ifdef CONFIG_OPD2413_UFS_READ
 	if (current_el() == 1 && original_ufs_sid == 0x60) {
 		const struct opd_ufs_io io = {snapshot_read32, probe_write32, probe_sync, probe_delay, NULL};
-		android_handoff_safe = opd2413_ufs_read_gpt(&io, (volatile void *)OPD_DMA_BASE, NULL) >= 0;
+		android_handoff_safe = opd2413_ufs_survey(&io, (volatile void *)OPD_DMA_BASE, NULL,
+			IS_ENABLED(CONFIG_OPD2413_UFS_WAKE) ? OPD_UFS_WAKE : 0) >= 0;
 	} else printf("UFS_READ skipped: unexpected EL or stream ID\n");
 #endif
 #ifdef CONFIG_OPD2413_UFS_LINK_CHECK

@@ -23,8 +23,10 @@ def main():
     ap.add_argument('--ufs-nop', action='store_true', help='Send one NOP on the pre-initialized link and restore the original queue; no storage commands')
     ap.add_argument('--ufs-link-check', action='store_true', help='DME_GET link state only, without DMA')
     ap.add_argument('--halt-on-failure', action='store_true', help='Debug: if the Android return is refused, stay on screen instead of the firmware reset that loses the RAM log')
+    ap.add_argument('--ufs-wake', action='store_true', help='With --ufs-read: START STOP UNIT to Active from Sleep/PowerDown, then restore and verify the original power mode (implies --ufs-read)')
     ap.add_argument('--ufs-read', action='store_true', help='Read-only LUN/capacity/GPT survey on the pre-initialized link; restores the original queue')
     a = ap.parse_args()
+    a.ufs_read |= a.ufs_wake
     if a.ufs_nop + a.ufs_link_check + a.ufs_read > 1:
         ap.error('Select only one of --ufs-nop, --ufs-link-check and --ufs-read')
     if a.halt_on_failure and not (a.ufs_nop or a.ufs_link_check or a.ufs_read):
@@ -49,6 +51,8 @@ def main():
             run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_LINK_CHECK'], log)
         if a.ufs_read:
             run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_READ'], log)
+        if a.ufs_wake:
+            run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_WAKE'], log)
         if a.ufs_nop or a.ufs_link_check or a.ufs_read:
             # Keep the probe result visible during the countdown instead of
             # scrolling it away with the long bdinfo memory-bank listing.
@@ -68,7 +72,8 @@ def main():
                                 ('OPD2413_SMMU_SNAPSHOT', a.smmu_snapshot),
                                 ('OPD2413_UFS_NOP', a.ufs_nop),
                                 ('OPD2413_UFS_LINK_CHECK', a.ufs_link_check),
-                                ('OPD2413_UFS_READ', a.ufs_read)]:
+                                ('OPD2413_UFS_READ', a.ufs_read),
+                                ('OPD2413_UFS_WAKE', a.ufs_wake)]:
             if (f'CONFIG_{symbol}=y' in config) != enabled:
                 raise ValueError('Snapshot configuration mismatch: ' + symbol)
         # This observer cannot initialize or write storage or persistent env.

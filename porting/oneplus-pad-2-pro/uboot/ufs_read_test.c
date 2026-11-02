@@ -18,7 +18,8 @@ struct disk { uint8_t lun; uint32_t block; uint64_t last; uint8_t *primary, *bac
 struct mock {
 	uint32_t host[1024], smmu[OPD_SMMU_SIZE / 4];
 	unsigned char *dma;
-	unsigned writes, commands, hibernated, pending, fail_at, mode, ua_pending, uic, target_failed;
+	unsigned writes, commands, hibernated, pending, fail_at, mode, ua_pending, uic, target_failed, asleep, queries, ssu_allowed, ssus;
+	uint8_t power_mode;
 	unsigned opcodes[256];
 	struct disk disk[3]; unsigned disks;
 };
@@ -66,10 +67,42 @@ static struct disk *find(struct mock *s, uint8_t lun)
 }
 
 /* Execute the submitted UTRD; returns via the response UPIU and data. */
+static void execute_query(struct mock *s)
+{
+	uint32_t *utrd = (uint32_t *)s->dma;
+	uint8_t *cmd = s->dma + 0x1000, *rsp = s->dma + 0x1200;
+	/* STANDARD READ only: descriptor, attribute or flag; no PRDT. */
+	assert(utrd[0] == 0x11000000U && utrd[2] == 0xf && utrd[7] == 0x01000000U);
+	assert(cmd[1] == 0 && cmd[2] == 0 && !cmd[3] && cmd[4] == 0 && cmd[5] == 0x01);
+	assert(!cmd[8] && !cmd[9] && !cmd[10] && !cmd[11]);
+	uint8_t op = cmd[12], idn = cmd[13];
+	uint16_t length = cmd[18] << 8 | cmd[19];
+	assert((op == 0x01 && idn == 0x00 && length == 0x40) || (op == 0x03 && (idn == 0x02 || idn == 0x00) && !length) ||
+	       (op == 0x05 && idn == 0x01 && !length));
+	for (unsigned i = 20; i < 32; ++i) assert(!cmd[i]);
+	for (unsigned i = 0; i < 512; ++i) assert(rsp[i] == 0xa5);
+	++s->queries; ++s->commands;
+	memset(rsp, 0, 512);
+	rsp[0] = s->mode == 3 && s->commands == s->fail_at ? 0x3f : 0x36;
+	utrd[2] = s->mode == 2 && s->commands == s->fail_at ? 1 : 0;
+	rsp[12] = op; rsp[13] = idn;
+	if (s->mode == 8 && op == 0x03) rsp[6] = 0xf6; /* query failure, not transport */
+	if (op == 0x03) wr_be32(rsp + 20, idn == 0x02 ? (s->mode == 10 && s->ssus == 2 ? 0x11 : s->power_mode) : 0x01);
+	if (op == 0x05) rsp[23] = 0;
+	if (op == 0x01) {
+		rsp[11] = 0x40;
+		uint8_t *d = rsp + 32;
+		d[0] = 0x59; d[1] = 0x00; d[6] = 6; d[10] = 1; d[16] = 0x04; d[17] = 0x00; d[24] = 0x01; d[25] = 0xce;
+	}
+	s->host[0x58/4] = 0;
+	s->host[0x20/4] |= 1;
+}
+
 static void execute(struct mock *s)
 {
 	uint32_t *utrd = (uint32_t *)s->dma;
 	uint8_t *cmd = s->dma + 0x1000, *rsp = s->dma + 0x1200, *data = s->dma + DATA;
+	if (cmd[0] == 0x16) { execute_query(s); return; }
 	uint32_t xfer = rd_be32(cmd + 12);
 	uint8_t op = cmd[16], lun = cmd[2];
 	/* Independent wire-format and read-only checks. */
@@ -77,7 +110,7 @@ static void execute(struct mock *s)
 	assert(utrd[4] == OPD_DMA_BASE + 0x1000 && !utrd[5] && utrd[6] == 0x00800080);
 	assert(utrd[7] == (xfer ? 0x01000001U : 0x01000000U));
 	assert(cmd[0] == 0x01 && cmd[1] == (xfer ? 0x40 : 0) && !cmd[3] && !cmd[4]);
-	assert(op == 0x00 || op == 0xa0 || op == 0x25 || op == 0x9e || op == 0x28);
+	assert(op == 0x00 || op == 0xa0 || op == 0x25 || op == 0x9e || op == 0x28 || (op == 0x1b && s->ssu_allowed));
 	if (xfer) {
 		uint32_t *prd = (uint32_t *)(s->dma + 0x1400);
 		assert(prd[0] == OPD_DMA_BASE + DATA && !prd[1] && !prd[2] && prd[3] == ((xfer - 1) | 3));
@@ -92,6 +125,22 @@ static void execute(struct mock *s)
 	uint8_t status = 0, key = 0, asc = 0;
 	uint32_t residual = 0;
 	struct disk *d = find(s, lun);
+	if (op == 0x1b) {
+		/* START STOP UNIT: Device W-LUN, POWER CONDITION only, IMMED=0. */
+		assert(lun == 0xd0 && !xfer && !cmd[17] && !cmd[18] && !cmd[19] && !cmd[21]);
+		assert(cmd[20] == 0x10 || cmd[20] == 0x30 || cmd[20] == 0x20);
+		++s->ssus;
+		if (s->mode == 9) { status = 2; key = 5; asc = 0x24; }
+		else {
+			s->asleep = cmd[20] != 0x10;
+			s->power_mode = cmd[20] == 0x10 ? 0x11 : cmd[20] == 0x30 ? 0x33 : 0x22;
+			if (!s->asleep) s->ua_pending = 1; /* power-on UA on LUN 0 */
+		}
+		rsp[6] = 0; rsp[7] = status;
+		if (status) { rsp[33] = 18; rsp[34] = 0x70; rsp[36] = key; rsp[46] = asc; }
+		s->host[0x58/4] = 0; s->host[0x20/4] |= 1;
+		return;
+	}
 	if (op == 0xa0) {
 		assert(lun == 0x81);
 		if (s->mode == 5) { status = 2; key = 5; asc = 0x20; }
@@ -128,7 +177,13 @@ static void execute(struct mock *s)
 		}
 		if (s->mode == 4 && s->commands == s->fail_at) residual = xfer + 1;
 	}
+	if (s->asleep) {
+		/* Device in a low-power mode, as ABL leaves it: Target Failure +
+		 * CHECK CONDITION NOT READY, INITIALIZING COMMAND REQUIRED. */
+		if (op == 0x00 || op == 0xa0 || d) { status = 2; key = 2; asc = 0x04; }
+	}
 	rsp[6] = 0; rsp[7] = status;
+	if (s->asleep && status == 2 && key == 2) { rsp[6] = 1; rsp[47] = 0x02; }
 	/* Target Failure: REPORT LUNS (mode 6) or LUN 0's first READ(10) (mode 7). */
 	if ((s->mode == 6 && op == 0xa0) || (s->mode == 7 && op == 0x28 && lun == 0 && !s->target_failed)) {
 		rsp[6] = 1; rsp[7] = 0; status = 0; s->target_failed = 1;
@@ -194,7 +249,9 @@ static void init(struct mock *s, unsigned char *dma)
 	memset(s->host, 0, sizeof(s->host)); memset(s->smmu, 0, sizeof(s->smmu));
 	memset(s->opcodes, 0, sizeof(s->opcodes));
 	s->dma = dma; s->hibernated = 1; s->writes = s->commands = s->pending = s->uic = 0;
-	s->fail_at = s->mode = 0; s->ua_pending = 1; s->target_failed = 0;
+	s->fail_at = s->mode = 0; s->ua_pending = 1; s->target_failed = 0; s->asleep = 0; s->queries = 0;
+	s->ssu_allowed = s->ssus = 0;
+	s->power_mode = 0x11;
 	s->host[0] = 0xd5c7031f; s->host[0x08/4] = 0x400;
 	s->host[0xe4/4] = 0x60010000; s->host[0x34/4] = 1;
 	s->host[0x30/4] = 0x10f; s->host[0x20/4] = 0x400;
@@ -241,7 +298,10 @@ int main(void)
 	init(s, dma);
 	assert(!opd2413_ufs_read_gpt(&io, dma, &r));
 	restored(s);
-	assert(r.luns == 3 && s->opcodes[0xa0] == 1 && s->opcodes[0x9e] == 1);
+	assert(r.luns == 3 && s->opcodes[0xa0] == 1 && s->opcodes[0x9e] == 1 && s->queries == 4);
+	assert(r.power_mode_ok && r.power_mode == 0x11 && r.boot_lun_ok && r.boot_lun == 1);
+	assert(r.device_init_ok && !r.device_init && r.descriptor_ok && r.number_lu == 6);
+	assert(r.init_power_mode == 1 && r.spec_version == 0x0400 && r.manufacturer_id == 0x01ce);
 	assert(s->opcodes[0x00] == 4); /* UNIT ATTENTION on LUN 0 retried once */
 	assert(r.lun[0].capacity_ok && r.lun[0].primary_ok && r.lun[0].backup_ok);
 	assert(r.lun[0].last_lba == 1000 && r.lun[0].partitions == 3);
@@ -263,6 +323,50 @@ int main(void)
 	init(s, dma); s->mode = 6;
 	assert(!opd2413_ufs_read_gpt(&io, dma, &r));
 	restored(s); assert(r.luns == 8 && r.lun[0].primary_ok && r.lun[0].partitions == 3);
+	/* The OPD2413 state: UFS-PowerDown, every unit NOT READY 04/02. Queries
+	 * still answer; the survey completes and restores without reading. */
+	init(s, dma); s->asleep = 1; s->power_mode = 0x33;
+	assert(!opd2413_ufs_read_gpt(&io, dma, &r));
+	restored(s); assert(r.power_mode_ok && r.power_mode == 0x33 && r.luns == 8);
+	for (unsigned i = 0; i < 8; ++i) assert(!r.lun[i].capacity_ok);
+	assert(!s->opcodes[0x25] && !s->opcodes[0x28]);
+	/* OPD_UFS_WAKE from PowerDown: wake, full GPT survey, restore 0x33 and
+	 * verify it by query before the queue and Hibern8 are restored. */
+	init(s, dma); s->asleep = 1; s->power_mode = 0x33; s->ssu_allowed = 1;
+	assert(!opd2413_ufs_survey(&io, dma, &r, OPD_UFS_WAKE));
+	restored(s); assert(s->ssus == 2 && s->asleep && s->power_mode == 0x33);
+	assert(r.woke && r.restored_power_mode == 0x33 && r.luns == 3);
+	assert(r.lun[0].primary_ok && r.lun[0].backup_ok && r.lun[0].partitions == 3);
+	assert(s->queries == 6); /* four reads + post-wake + post-restore power mode */
+	/* Wake refused: completed, no restore, survey of the sleeping device. */
+	init(s, dma); s->asleep = 1; s->power_mode = 0x33; s->ssu_allowed = 1; s->mode = 9;
+	assert(!opd2413_ufs_survey(&io, dma, &r, OPD_UFS_WAKE));
+	restored(s); assert(s->ssus == 1 && !r.woke && !r.lun[0].capacity_ok);
+	/* Restore that does not read back the original mode is uncertain. */
+	init(s, dma); s->asleep = 1; s->power_mode = 0x33; s->ssu_allowed = 1; s->mode = 10;
+	assert(opd2413_ufs_survey(&io, dma, &r, OPD_UFS_WAKE) == -1 && !s->host[0x60/4]);
+	/* An already active device is never touched. */
+	init(s, dma); s->ssu_allowed = 1;
+	assert(!opd2413_ufs_survey(&io, dma, &r, OPD_UFS_WAKE));
+	restored(s); assert(!s->ssus && !r.woke && r.lun[0].primary_ok);
+	/* SSU whitelist. */
+	uint8_t ssu[6] = {0x1b, 0, 0, 0, 0x10, 0};
+	assert(opd2413_ufs_ssu_allowed(0xd0, ssu, 6, 0) && !opd2413_ufs_ssu_allowed(0x00, ssu, 6, 0));
+	ssu[4] = 0x11; assert(!opd2413_ufs_ssu_allowed(0xd0, ssu, 6, 0)); /* START bit */
+	ssu[4] = 0x40; assert(!opd2413_ufs_ssu_allowed(0xd0, ssu, 6, 0)); /* DeepSleep */
+	ssu[4] = 0x10; ssu[1] = 1; assert(!opd2413_ufs_ssu_allowed(0xd0, ssu, 6, 0)); /* IMMED */
+	ssu[1] = 0; ssu[4] = 0x30; ssu[3] = 4; assert(!opd2413_ufs_ssu_allowed(0xd0, ssu, 6, 0)); /* NO_FLUSH */
+	assert(!opd2413_ufs_read_allowed((const uint8_t[6]){0x1b, 0, 0, 0, 0x10, 0}, 6, 0)); /* not read-only */
+	/* A query failure response is completed and not fatal. */
+	init(s, dma); s->mode = 8;
+	assert(!opd2413_ufs_read_gpt(&io, dma, &r));
+	restored(s); assert(!r.power_mode_ok && !r.boot_lun_ok && r.descriptor_ok && r.lun[0].primary_ok);
+	/* Query whitelist. */
+	assert(opd2413_ufs_query_allowed(0x01, 0x01, 0x40) && opd2413_ufs_query_allowed(0x01, 0x03, 0));
+	assert(!opd2413_ufs_query_allowed(0x81, 0x03, 0)); /* STANDARD WRITE */
+	assert(!opd2413_ufs_query_allowed(0x01, 0x02, 0x40)); /* WRITE DESCRIPTOR */
+	assert(!opd2413_ufs_query_allowed(0x01, 0x04, 0) && !opd2413_ufs_query_allowed(0x01, 0x06, 0));
+	assert(!opd2413_ufs_query_allowed(0x01, 0x07, 0) && !opd2413_ufs_query_allowed(0x01, 0x08, 0));
 	/* A Target Failure on one READ only marks that LUN. */
 	init(s, dma); s->mode = 7;
 	assert(!opd2413_ufs_read_gpt(&io, dma, &r));
@@ -284,7 +388,7 @@ int main(void)
 	init(s, dma);
 	assert(!opd2413_ufs_read_gpt(&io, dma, &r));
 	const unsigned total = s->commands;
-	assert(total == 11);
+	assert(total == 15);
 	unsigned residual_failures = 0;
 	for (unsigned mode = 1; mode <= 4; ++mode) {
 		for (unsigned at = 1; at <= total; ++at) {

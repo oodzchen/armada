@@ -78,6 +78,9 @@ def main():
                   '\tdepends on OPD2413_SMMU_SNAPSHOT && !OPD2413_UFS_NOP && !OPD2413_UFS_LINK_CHECK\n\tdefault n\n\n')
     insert_before(mach/'Makefile', 'obj-y += dram.o',
                   'obj-$(CONFIG_OPD2413_UFS_READ) += opd2413_ufs_read.o opd2413_ufs_nop.o opd2413_ufs_link.o\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_UFS_WAKE\n\tbool "Wake the UFS device for the survey and restore its power mode"\n'
+                  '\tdepends on OPD2413_UFS_READ\n\tdefault n\n\n')
     replace_once(root/'drivers/serial/Makefile', 'obj-$(CONFIG_SANDBOX_SERIAL)', 'obj-$(CONFIG_OPD2413_OBSERVER) += serial_opd2413_ramconsole.o\nobj-$(CONFIG_SANDBOX_SERIAL)')
     replace_once(mach/'qcom-priv.h', 'int qcom_parse_memory(', 'int opd2413_observer_fdt(void **out);\nvoid opd2413_observer_map(void);\nint opd2413_observer_late(void);\n\nint qcom_parse_memory(')
     replace_once(mach/'board.c', 'int board_fdt_blob_setup(void **fdtp)\n{', 'int board_fdt_blob_setup(void **fdtp)\n{\n\tif (IS_ENABLED(CONFIG_OPD2413_OBSERVER)) return opd2413_observer_fdt(fdtp);')
