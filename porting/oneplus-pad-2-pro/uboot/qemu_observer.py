@@ -78,7 +78,7 @@ mark:
     b 1b
 """
 
-def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=False):
+def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=False, ufs_nop=False, ufs_link=False):
     out.mkdir(parents=True, exist_ok=True)
     (out/'entry.S').write_text(ENTRY + (DROP_EL1 if el==1 else '    ldr x4, =0xb9000000\n    br x4\n'))
     subprocess.run(['aarch64-linux-gnu-gcc','-nostdlib','-static','-Wl,--build-id=none',
@@ -146,15 +146,16 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
                 if b'OPD2413_OBSERVER_END' not in text:time.sleep(.05);continue
                 assert f'READY EL{el} '.encode() in text
                 assert b'video probe=0' in text
-                assert b'framebuffer@fc800000 active' in text
-                assert b'0x0000000a00000000' in text
+                # Probe success plus non-solid physical framebuffer below;
+                # short probe environments omit the bdinfo device listing.
+                assert b'0x0000000a00000000' in text or b'0xa00000000' in text
                 if ufs_snapshot:
                     assert b'OPD2413_UFS_RO_END' in text
                     if ufs_snapshot in ['on', 'hwcg']:
                         assert b'VER                  00000400' in text
                         assert b'HW_VERSION           60000000' in text
                         assert b'PCS_READY            00000001' in text
-                        assert b'skipped' not in text
+                        assert b'UFS_RO host skipped' not in text and b'UFS_RO PHY skipped' not in text
                     else:
                         assert b'UFS_RO host skipped' in text and b'UFS_RO PHY skipped' in text
                 if smmu_snapshot:
@@ -163,6 +164,13 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
                     # exercise valid stream and context bank layouts.
                     assert b'OPD2413_SMMU_RO_END' in text
                     assert b'SMMU_RO invalid or inaccessible identification registers' in text
+                if ufs_nop:
+                    assert b'UFS_NOP skipped:' in text
+                    assert b'UFS_NOP_PASS' not in text
+                    assert b'UFS_NOP_FAIL' not in text
+                if ufs_link:
+                    assert b'UFS_LINK skipped:' in text
+                    assert b'UFS_LINK_FAIL' not in text
                 if handoff:
                     qmp('pmemsave',{'val':0xb91ff000,'size':4,'filename':str(out/'handoff.bin')})
                     marker=int.from_bytes((out/'handoff.bin').read_bytes(),'little')
@@ -191,8 +199,11 @@ def main():
     ap.add_argument('--handoff',action='store_true',help='Also verify original-kernel return with a register/MMU sentinel')
     ap.add_argument('--ufs-snapshot', choices=['on', 'off', 'hwcg'], help='Seed fake clock/power/register state for the snapshot build (no UFS emulation)')
     ap.add_argument('--smmu-snapshot', action='store_true', help='Check safe handling of the absent SMMUv2 (requires --ufs-snapshot)')
+    ap.add_argument('--ufs-nop', action='store_true', help='Check NOP preflight refuses the fake/absent hardware (requires --smmu-snapshot)')
+    ap.add_argument('--ufs-link-check', action='store_true', help='Check link-state preflight refuses the fake/absent hardware')
     a=ap.parse_args()
     if a.smmu_snapshot and not a.ufs_snapshot:ap.error('--smmu-snapshot requires --ufs-snapshot')
-    for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff,a.ufs_snapshot,a.smmu_snapshot)
+    if a.ufs_nop and not a.smmu_snapshot:ap.error('--ufs-nop requires --smmu-snapshot')
+    for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff,a.ufs_snapshot,a.smmu_snapshot,a.ufs_nop,a.ufs_link_check)
 
 if __name__=='__main__':main()

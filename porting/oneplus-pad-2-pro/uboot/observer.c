@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0+
-/* RAM-only OPD2413 bring-up. No storage or peripheral controller is enabled. */
+/* OPD2413 observer with optional explicit UFS diagnostics; no storage driver. */
 #include <asm/armv8/mmu.h>
 #include <asm/global_data.h>
 #include <asm/io.h>
@@ -12,6 +12,7 @@
 #include <console.h>
 #include <linux/libfdt.h>
 #include <linux/sizes.h>
+#include <linux/delay.h>
 #include <stdio.h>
 #include <string.h>
 #include <u-boot/crc.h>
@@ -19,15 +20,20 @@
 #include "opd2413_layout.h"
 #include "opd2413_ufs_snapshot.h"
 #include "opd2413_smmu_snapshot.h"
+#include "opd2413_ufs_nop.h"
+#include "opd2413_ufs_link.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 /* board_fdt_blob_setup runs before BSS is available. */
 static unsigned char probe_fdt[65536] __aligned(8) __section(".data") = {1};
-static struct mm_region probe_map[OPD_MAX_RANGES + 7];
+static struct mm_region probe_map[OPD_MAX_RANGES + 9];
 static u32 original_fdt_crc __section(".data") = 1;
 static u64 original_kernel_instructions __section(".data") = 1;
 #ifdef CONFIG_OPD2413_SMMU_SNAPSHOT
 static u32 original_ufs_sid __section(".data") = 0xffff;
+#endif
+#if defined(CONFIG_OPD2413_UFS_NOP) || defined(CONFIG_OPD2413_UFS_LINK_CHECK)
+static int android_handoff_safe = 1;
 #endif
 
 #define FB_BASE 0xfc800000ULL
@@ -87,6 +93,11 @@ void opd2413_observer_map(void)
 	if (!opd_contains(ram, count, LOG_BASE, LOG_SIZE) ||
 	    !opd_contains(ram, count, gd->relocaddr, gd->mon_len))
 		panic("observer: log or relocated image outside usable RAM\n");
+#ifdef CONFIG_OPD2413_UFS_NOP
+	if (!opd_contains(ram, count, OPD_DMA_BASE, OPD_DMA_SIZE) ||
+	    opd_carve(ram, &count, (struct opd_range){OPD_DMA_BASE, OPD_DMA_SIZE}))
+		panic("observer: DMA buffer outside usable RAM\n");
+#endif
 	for (size_t i = 0; i < count; ++i)
 		probe_map[i] = (struct mm_region){.phys=ram[i].base, .virt=ram[i].base,
 			.size=ram[i].size, .attrs=PTE_BLOCK_MEMTYPE(MT_NORMAL) | PTE_BLOCK_INNER_SHARE};
@@ -96,15 +107,29 @@ void opd2413_observer_map(void)
 #ifdef CONFIG_OPD2413_UFS_SNAPSHOT
 	const struct opd_range mmio[] = {
 		{OPD_GCC_UFS_BASE, OPD_GCC_UFS_SIZE}, {OPD_GCC_MEM_BASE, OPD_GCC_MEM_SIZE},
-		{OPD_UFS_BASE, OPD_UFS_SIZE}, {OPD_PHY_BASE, OPD_PHY_SIZE},
+		{OPD_UFS_BASE, 0x1000}, {OPD_UFS_BASE + 0x1000, OPD_UFS_SIZE - 0x1000},
+		{OPD_PHY_BASE, OPD_PHY_SIZE},
 #ifdef CONFIG_OPD2413_SMMU_SNAPSHOT
 		{OPD_SMMU_BASE, OPD_SMMU_SIZE},
 #endif
 	};
-	for (unsigned i = 0; i < ARRAY_SIZE(mmio); ++i)
+	for (unsigned i = 0; i < ARRAY_SIZE(mmio); ++i) {
+		u64 ro = PTE_BLOCK_RO;
+#if defined(CONFIG_OPD2413_UFS_NOP) || defined(CONFIG_OPD2413_UFS_LINK_CHECK)
+		if (mmio[i].base == OPD_UFS_BASE) ro = 0;
+#endif
 		probe_map[count++] = (struct mm_region){.phys=mmio[i].base, .virt=mmio[i].base,
 			.size=mmio[i].size, .attrs=PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
-			PTE_BLOCK_NON_SHARE | PTE_BLOCK_RO | PTE_BLOCK_PXN | PTE_BLOCK_UXN};
+			PTE_BLOCK_NON_SHARE | ro | PTE_BLOCK_PXN | PTE_BLOCK_UXN};
+	}
+#endif
+#ifdef CONFIG_OPD2413_UFS_NOP
+	/* Fixed private window inside the discarded 16 MiB U-Boot load slot.
+	 * This single-NOP observer invokes no subsequent low-memory allocator.
+	 */
+	probe_map[count++] = (struct mm_region){.phys=OPD_DMA_BASE, .virt=OPD_DMA_BASE,
+		.size=OPD_DMA_SIZE, .attrs=PTE_BLOCK_MEMTYPE(MT_NORMAL_NC) |
+		PTE_BLOCK_INNER_SHARE | PTE_BLOCK_PXN | PTE_BLOCK_UXN};
 #endif
 	probe_map[count] = (struct mm_region){0};
 	mem_map = probe_map;
@@ -115,6 +140,35 @@ static uint32_t snapshot_read32(uint64_t addr, void *ctx)
 {
 	return readl((const volatile void *)(uintptr_t)addr);
 }
+#endif
+
+#if defined(CONFIG_OPD2413_UFS_NOP) || defined(CONFIG_OPD2413_UFS_LINK_CHECK)
+static void probe_write32(uint64_t addr, uint32_t value, void *ctx)
+{
+	switch (addr - OPD_UFS_BASE) {
+#ifdef CONFIG_OPD2413_UFS_NOP
+	case 0x20:
+		if (value != 1 && value != 0x400 && value != 0x20 && value != 0x40)
+			panic("NOP: invalid W1C\n");
+		break;
+	case 0x50: case 0x54: case 0x58: case 0x60: break;
+	case 0x90:
+		if (value != 1 && value != 0x17 && value != 0x18)
+			panic("NOP: invalid UIC command\n");
+		break;
+	case 0x94: case 0x98: case 0x9c: break;
+#endif
+#ifdef CONFIG_OPD2413_UFS_LINK_CHECK
+	case 0x20: if (value != 0x400) panic("GET: invalid W1C\n"); break;
+	case 0x90: if (value != 1) panic("GET: invalid command\n"); break;
+	case 0x94: case 0x98: case 0x9c: break;
+#endif
+	default: panic("NOP: invalid register write\n");
+	}
+	writel(value, (volatile void *)(uintptr_t)addr);
+}
+static void probe_sync(void *ctx) { mb(); }
+static void probe_delay(unsigned us, void *ctx) { udelay(us); }
 #endif
 
 int opd2413_observer_late(void)
@@ -135,6 +189,18 @@ int opd2413_observer_late(void)
 #ifdef CONFIG_OPD2413_SMMU_SNAPSHOT
 	opd2413_smmu_snapshot(snapshot_read32, NULL, original_ufs_sid);
 #endif
+#ifdef CONFIG_OPD2413_UFS_NOP
+	if (current_el() == 1 && original_ufs_sid == 0x60) {
+		const struct opd_ufs_io io = {snapshot_read32, probe_write32, probe_sync, probe_delay, NULL};
+		android_handoff_safe = opd2413_ufs_nop(&io, (volatile void *)OPD_DMA_BASE) >= 0;
+	} else printf("UFS_NOP skipped: unexpected EL or stream ID\n");
+#endif
+#ifdef CONFIG_OPD2413_UFS_LINK_CHECK
+	if (current_el() == 1) {
+		const struct opd_ufs_io io = {snapshot_read32, probe_write32, probe_sync, probe_delay, NULL};
+		android_handoff_safe = opd2413_ufs_link_check(&io, NULL) >= 0;
+	} else printf("UFS_LINK skipped: unexpected EL\n");
+#endif
 	return 0;
 }
 
@@ -142,6 +208,12 @@ int opd2413_observer_late(void)
  * image loaded by U-Boot. Keep its original DT/ramdisk/TEE handoff intact. */
 static int do_opd_android(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 {
+#if defined(CONFIG_OPD2413_UFS_NOP) || defined(CONFIG_OPD2413_UFS_LINK_CHECK)
+	if (!android_handoff_safe) {
+		printf("observer: controller state uncertain; firmware reset required\n");
+		return CMD_RET_FAILURE;
+	}
+#endif
 	const void *fdt = (const void *)get_prev_bl_fdt_addr();
 	const volatile u32 *image = (const volatile u32 *)0xa8000000ULL;
 	if (fdt_check_header(fdt) ||

@@ -20,7 +20,12 @@ def main():
     ap.add_argument('--jobs', type=int, default=12)
     ap.add_argument('--ufs-snapshot', action='store_true', help='Map whitelisted UFS/GCC/PHY pages read-only and snapshot ABL state')
     ap.add_argument('--smmu-snapshot', action='store_true', help='Also snapshot the ABL UFS stream/context mapping (implies --ufs-snapshot)')
+    ap.add_argument('--ufs-nop', action='store_true', help='Send one NOP on the pre-initialized link and restore the original queue; no storage commands')
+    ap.add_argument('--ufs-link-check', action='store_true', help='DME_GET link state only, without DMA')
     a = ap.parse_args()
+    if a.ufs_nop and a.ufs_link_check:ap.error('Select only one of --ufs-nop and --ufs-link-check')
+    a.smmu_snapshot |= a.ufs_nop or a.ufs_link_check
+    a.ufs_snapshot |= a.smmu_snapshot
     src, out, fdt = a.source.resolve(), a.out.resolve(), a.fdt.resolve()
     overlay = Path(__file__).resolve().parent
     jobs = max(1, min(a.jobs, max(1, (os.cpu_count() or 1) - 1)))
@@ -33,12 +38,25 @@ def main():
             run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_SNAPSHOT'], log)
         if a.smmu_snapshot:
             run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_SMMU_SNAPSHOT'], log)
+        if a.ufs_nop:
+            run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_NOP'], log)
+        if a.ufs_link_check:
+            run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_LINK_CHECK'], log)
+        if a.ufs_nop or a.ufs_link_check:
+            # Keep the probe result visible during the countdown instead of
+            # scrolling it away with the long bdinfo memory-bank listing.
+            env = out/'probe.env'
+            env.write_text((overlay/'observer.env').read_text().replace('version; bdinfo;', 'version;'))
+            run([src/'scripts/config', '--file', out/'build/.config', '--set-str',
+                 'ENV_DEFAULT_ENV_TEXT_FILE', env], log)
         if a.ufs_snapshot or a.smmu_snapshot:
             run(make + ['olddefconfig'], log)
         run(make + [f'-j{jobs}', 'u-boot-nodtb.bin'], log)
         config = (out/'build/.config').read_text().splitlines()
         for symbol, enabled in [('OPD2413_UFS_SNAPSHOT', a.ufs_snapshot or a.smmu_snapshot),
-                                ('OPD2413_SMMU_SNAPSHOT', a.smmu_snapshot)]:
+                                ('OPD2413_SMMU_SNAPSHOT', a.smmu_snapshot),
+                                ('OPD2413_UFS_NOP', a.ufs_nop),
+                                ('OPD2413_UFS_LINK_CHECK', a.ufs_link_check)]:
             if (f'CONFIG_{symbol}=y' in config) != enabled:
                 raise ValueError('Snapshot configuration mismatch: ' + symbol)
         # This observer cannot initialize or write storage or persistent env.
@@ -51,6 +69,8 @@ def main():
         shutil.copyfile(overlay/'layout.h', out/'opd2413_layout.h')
         shutil.copyfile(overlay/'ufs_snapshot.h', out/'opd2413_ufs_snapshot.h')
         shutil.copyfile(overlay/'smmu_snapshot.h', out/'opd2413_smmu_snapshot.h')
+        shutil.copyfile(overlay/'ufs_nop.h', out/'opd2413_ufs_nop.h')
+        shutil.copyfile(overlay/'ufs_link.h', out/'opd2413_ufs_link.h')
         lib = src/'scripts/dtc/libfdt'
         sources = ['fdt.c', 'fdt_ro.c', 'fdt_check.c', 'fdt_sw.c', 'fdt_rw.c',
                    'fdt_wip.c', 'fdt_empty_tree.c', 'fdt_addresses.c']
@@ -73,6 +93,14 @@ def main():
              overlay/'smmu_snapshot.c', overlay/'smmu_snapshot_test.c', *[lib/s for s in sources],
              '-o', out/'smmu-snapshot-test'], log)
         run([out/'smmu-snapshot-test', fdt], log)
+        run(['cc', '-g', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+             '-I'+str(out), overlay/'ufs_nop.c', overlay/'ufs_link.c', overlay/'ufs_nop_test.c',
+             '-o', out/'ufs-nop-test'], log)
+        run([out/'ufs-nop-test'], log)
+        run(['cc', '-g', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+             '-I'+str(out), overlay/'ufs_link.c', overlay/'ufs_link_test.c',
+             '-o', out/'ufs-link-test'], log)
+        run([out/'ufs-link-test'], log)
     print('PASS: observer built, storage disabled, ASan/UBSan FDT and memory checks passed')
     print(out/'build/u-boot-nodtb.bin')
 
