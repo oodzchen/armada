@@ -78,7 +78,7 @@ mark:
     b 1b
 """
 
-def test(binary, fdt, out, el, handoff=False):
+def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=False):
     out.mkdir(parents=True, exist_ok=True)
     (out/'entry.S').write_text(ENTRY + (DROP_EL1 if el==1 else '    ldr x4, =0xb9000000\n    br x4\n'))
     subprocess.run(['aarch64-linux-gnu-gcc','-nostdlib','-static','-Wl,--build-id=none',
@@ -98,6 +98,26 @@ def test(binary, fdt, out, el, handoff=False):
     for file,addr,extra in [(binary,0xb9000000,''),(fdt,0xb6947000,''),(out/'entry.bin',0x40200000,',cpu-num=0')]:
         command+=['-device',f'loader,file={file},addr={addr:#x}{extra}']
     if handoff:command+=['-device',f'loader,file={out}/sentinel.bin,addr=0xa8000000']
+    if ufs_snapshot:
+        # QEMU virt ROM backs these low physical addresses. Seed register values,
+        # not an emulated UFS device: this checks access/gating and MMU handoff.
+        values = {0x177000: 0, 0x177004: 0, 0x19e000: 0,
+                  0x177028: 0x80000000, 0x1770bc: 0x80000000}
+        if ufs_snapshot in ['on', 'hwcg']:
+            values.update({0x177004: 0x80000000, 0x19e000: 0x80000000,
+                           0x177028: 1, 0x1770bc: 1, 0x1d84008: 0x400,
+                           0x1d840e4: 0x60000000, 0x1d805a8: 1})
+        if ufs_snapshot == 'hwcg':
+            values.update({0x177028: 0x88000003, 0x1770bc: 0x88000003})
+        pages = {}
+        for addr, value in values.items():
+            base = addr & ~0xfff
+            page = pages.setdefault(base, bytearray(4096))
+            page[addr-base:addr-base+4] = value.to_bytes(4, 'little')
+        for base, page in pages.items():
+            path = out/f'registers-{base:x}.bin'
+            path.write_bytes(page)
+            command += ['-device', f'loader,file={path},addr={base:#x}']
     with (out/'stderr.log').open('wb') as log:
         process=subprocess.Popen(command,stdout=log,stderr=log)
         try:
@@ -128,12 +148,27 @@ def test(binary, fdt, out, el, handoff=False):
                 assert b'video probe=0' in text
                 assert b'framebuffer@fc800000 active' in text
                 assert b'0x0000000a00000000' in text
+                if ufs_snapshot:
+                    assert b'OPD2413_UFS_RO_END' in text
+                    if ufs_snapshot in ['on', 'hwcg']:
+                        assert b'VER                  00000400' in text
+                        assert b'HW_VERSION           60000000' in text
+                        assert b'PCS_READY            00000001' in text
+                        assert b'skipped' not in text
+                    else:
+                        assert b'UFS_RO host skipped' in text and b'UFS_RO PHY skipped' in text
+                if smmu_snapshot:
+                    # This address is an empty PCIe window on virt, not an
+                    # SMMUv2. Check the invalid-ID guard here. Host fixtures
+                    # exercise valid stream and context bank layouts.
+                    assert b'OPD2413_SMMU_RO_END' in text
+                    assert b'SMMU_RO invalid or inaccessible identification registers' in text
                 if handoff:
                     qmp('pmemsave',{'val':0xb91ff000,'size':4,'filename':str(out/'handoff.bin')})
                     marker=int.from_bytes((out/'handoff.bin').read_bytes(),'little')
                     if not marker:time.sleep(.05);continue
                     assert marker==0x50415353, 'Linux entry register/MMU contract failed'
-                    assert b'OPD2413_ANDROID_HANDOFF' in text
+                    if b'OPD2413_ANDROID_HANDOFF' not in text:time.sleep(.05);continue
                 qmp('stop')
                 qmp('pmemsave',{'val':0xfc800000,'size':3392*2400*4,'filename':str(out/'framebuffer.bin')})
                 pixels=(out/'framebuffer.bin').read_bytes()
@@ -154,7 +189,10 @@ def main():
     ap.add_argument('--fdt',type=Path,required=True)
     ap.add_argument('--out',type=Path,required=True)
     ap.add_argument('--handoff',action='store_true',help='Also verify original-kernel return with a register/MMU sentinel')
+    ap.add_argument('--ufs-snapshot', choices=['on', 'off', 'hwcg'], help='Seed fake clock/power/register state for the snapshot build (no UFS emulation)')
+    ap.add_argument('--smmu-snapshot', action='store_true', help='Check safe handling of the absent SMMUv2 (requires --ufs-snapshot)')
     a=ap.parse_args()
-    for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff)
+    if a.smmu_snapshot and not a.ufs_snapshot:ap.error('--smmu-snapshot requires --ufs-snapshot')
+    for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff,a.ufs_snapshot,a.smmu_snapshot)
 
 if __name__=='__main__':main()

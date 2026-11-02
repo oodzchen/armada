@@ -2,6 +2,7 @@
 /* RAM-only OPD2413 bring-up. No storage or peripheral controller is enabled. */
 #include <asm/armv8/mmu.h>
 #include <asm/global_data.h>
+#include <asm/io.h>
 #include <asm/system.h>
 #include <asm/u-boot-arm.h>
 #include <command.h>
@@ -16,13 +17,18 @@
 #include <u-boot/crc.h>
 #include "qcom-priv.h"
 #include "opd2413_layout.h"
+#include "opd2413_ufs_snapshot.h"
+#include "opd2413_smmu_snapshot.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 /* board_fdt_blob_setup runs before BSS is available. */
 static unsigned char probe_fdt[65536] __aligned(8) __section(".data") = {1};
-static struct mm_region probe_map[OPD_MAX_RANGES + 2];
+static struct mm_region probe_map[OPD_MAX_RANGES + 7];
 static u32 original_fdt_crc __section(".data") = 1;
 static u64 original_kernel_instructions __section(".data") = 1;
+#ifdef CONFIG_OPD2413_SMMU_SNAPSHOT
+static u32 original_ufs_sid __section(".data") = 0xffff;
+#endif
 
 #define FB_BASE 0xfc800000ULL
 #define FB_SIZE (3392ULL * 2400 * 4)
@@ -40,6 +46,12 @@ int opd2413_observer_fdt(void **out)
     const void *src = (const void *)get_prev_bl_fdt_addr();
     int ret = opd2413_filter_fdt(src, probe_fdt, sizeof(probe_fdt));
     if (ret) return ret;
+#ifdef CONFIG_OPD2413_UFS_SNAPSHOT
+    if (opd2413_ufs_resources(src)) return -EINVAL;
+#endif
+#ifdef CONFIG_OPD2413_SMMU_SNAPSHOT
+    if (opd2413_smmu_resources(src, &original_ufs_sid)) return -EINVAL;
+#endif
     original_fdt_crc = crc32(0, src, fdt_totalsize(src));
     original_kernel_instructions = *(const volatile u64 *)0xa8000000ULL;
     ret = qcom_parse_memory(src, false);
@@ -80,9 +92,30 @@ void opd2413_observer_map(void)
 			.size=ram[i].size, .attrs=PTE_BLOCK_MEMTYPE(MT_NORMAL) | PTE_BLOCK_INNER_SHARE};
 	probe_map[count] = (struct mm_region){.phys=FB_BASE, .virt=FB_BASE, .size=FB_SIZE,
 		.attrs=PTE_BLOCK_MEMTYPE(MT_NORMAL_NC) | PTE_BLOCK_INNER_SHARE | PTE_BLOCK_PXN | PTE_BLOCK_UXN};
-	probe_map[count+1] = (struct mm_region){0};
+	++count;
+#ifdef CONFIG_OPD2413_UFS_SNAPSHOT
+	const struct opd_range mmio[] = {
+		{OPD_GCC_UFS_BASE, OPD_GCC_UFS_SIZE}, {OPD_GCC_MEM_BASE, OPD_GCC_MEM_SIZE},
+		{OPD_UFS_BASE, OPD_UFS_SIZE}, {OPD_PHY_BASE, OPD_PHY_SIZE},
+#ifdef CONFIG_OPD2413_SMMU_SNAPSHOT
+		{OPD_SMMU_BASE, OPD_SMMU_SIZE},
+#endif
+	};
+	for (unsigned i = 0; i < ARRAY_SIZE(mmio); ++i)
+		probe_map[count++] = (struct mm_region){.phys=mmio[i].base, .virt=mmio[i].base,
+			.size=mmio[i].size, .attrs=PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
+			PTE_BLOCK_NON_SHARE | PTE_BLOCK_RO | PTE_BLOCK_PXN | PTE_BLOCK_UXN};
+#endif
+	probe_map[count] = (struct mm_region){0};
 	mem_map = probe_map;
 }
+
+#ifdef CONFIG_OPD2413_UFS_SNAPSHOT
+static uint32_t snapshot_read32(uint64_t addr, void *ctx)
+{
+	return readl((const volatile void *)(uintptr_t)addr);
+}
+#endif
 
 int opd2413_observer_late(void)
 {
@@ -96,6 +129,12 @@ int opd2413_observer_late(void)
 	printf("OPD2413_OBSERVER_READY EL%u original_fdt=%llx\n", current_el(),
 	       (unsigned long long)get_prev_bl_fdt_addr());
 	printf("No storage drivers or environment writes enabled.\n");
+#ifdef CONFIG_OPD2413_UFS_SNAPSHOT
+	opd2413_ufs_snapshot(snapshot_read32, NULL);
+#endif
+#ifdef CONFIG_OPD2413_SMMU_SNAPSHOT
+	opd2413_smmu_snapshot(snapshot_read32, NULL, original_ufs_sid);
+#endif
 	return 0;
 }
 

@@ -18,6 +18,8 @@ def main():
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--fdt', type=Path, required=True, help='Private OPD2413 ABL FDT for host validation')
     ap.add_argument('--jobs', type=int, default=12)
+    ap.add_argument('--ufs-snapshot', action='store_true', help='Map whitelisted UFS/GCC/PHY pages read-only and snapshot ABL state')
+    ap.add_argument('--smmu-snapshot', action='store_true', help='Also snapshot the ABL UFS stream/context mapping (implies --ufs-snapshot)')
     a = ap.parse_args()
     src, out, fdt = a.source.resolve(), a.out.resolve(), a.fdt.resolve()
     overlay = Path(__file__).resolve().parent
@@ -27,8 +29,18 @@ def main():
         run([sys.executable, overlay/'prepare.py', src], log)
         make = ['make', '-C', src, f'O={out}/build', 'CROSS_COMPILE=aarch64-linux-gnu-']
         run(make + ['opd2413_observer_defconfig'], log)
+        if a.ufs_snapshot or a.smmu_snapshot:
+            run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_SNAPSHOT'], log)
+        if a.smmu_snapshot:
+            run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_SMMU_SNAPSHOT'], log)
+        if a.ufs_snapshot or a.smmu_snapshot:
+            run(make + ['olddefconfig'], log)
         run(make + [f'-j{jobs}', 'u-boot-nodtb.bin'], log)
         config = (out/'build/.config').read_text().splitlines()
+        for symbol, enabled in [('OPD2413_UFS_SNAPSHOT', a.ufs_snapshot or a.smmu_snapshot),
+                                ('OPD2413_SMMU_SNAPSHOT', a.smmu_snapshot)]:
+            if (f'CONFIG_{symbol}=y' in config) != enabled:
+                raise ValueError('Snapshot configuration mismatch: ' + symbol)
         # This observer cannot initialize or write storage or persistent env.
         for symbol in ['UFS', 'MMC', 'SCSI', 'USB', 'MTD', 'SPI_FLASH', 'FASTBOOT',
                        'CMD_SAVEENV', 'EFI_LOADER']:
@@ -37,6 +49,8 @@ def main():
         if 'CONFIG_ENV_IS_NOWHERE=y' not in config:
             raise ValueError('Observer environment must stay in RAM')
         shutil.copyfile(overlay/'layout.h', out/'opd2413_layout.h')
+        shutil.copyfile(overlay/'ufs_snapshot.h', out/'opd2413_ufs_snapshot.h')
+        shutil.copyfile(overlay/'smmu_snapshot.h', out/'opd2413_smmu_snapshot.h')
         lib = src/'scripts/dtc/libfdt'
         sources = ['fdt.c', 'fdt_ro.c', 'fdt_check.c', 'fdt_sw.c', 'fdt_rw.c',
                    'fdt_wip.c', 'fdt_empty_tree.c', 'fdt_addresses.c']
@@ -49,6 +63,16 @@ def main():
              overlay/'ramconsole_test.c', '-o', out/'ramconsole-test'], log)
         run([out/'ramconsole-test', out/'ramconsole-fixture.bin'], log)
         run([sys.executable, overlay/'test_decode.py', out/'ramconsole-fixture.bin'], log)
+        run(['cc', '-g', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+             '-DOPD2413_HOST_TEST', '-I'+str(lib), '-I'+str(out),
+             overlay/'ufs_snapshot.c', overlay/'ufs_snapshot_test.c', *[lib/s for s in sources],
+             '-o', out/'ufs-snapshot-test'], log)
+        run([out/'ufs-snapshot-test', fdt], log)
+        run(['cc', '-g', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+             '-DOPD2413_HOST_TEST', '-I'+str(lib), '-I'+str(out),
+             overlay/'smmu_snapshot.c', overlay/'smmu_snapshot_test.c', *[lib/s for s in sources],
+             '-o', out/'smmu-snapshot-test'], log)
+        run([out/'smmu-snapshot-test', fdt], log)
     print('PASS: observer built, storage disabled, ASan/UBSan FDT and memory checks passed')
     print(out/'build/u-boot-nodtb.bin')
 

@@ -16,6 +16,12 @@ def replace_once(path, old, new):
     path.write_text(text.replace(old, new))
 
 
+def insert_before(path, anchor, addition):
+    if addition in path.read_text():
+        return
+    replace_once(path, anchor, addition + anchor)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('source', type=Path)
@@ -27,14 +33,29 @@ def main():
     for source, target in [('observer.c', mach/'opd2413_observer.c'),
                            ('layout.h', mach/'opd2413_layout.h'),
                            ('filter.c', mach/'opd2413_filter.c'),
+                           ('ufs_snapshot.c', mach/'opd2413_ufs_snapshot.c'),
+                           ('ufs_snapshot.h', mach/'opd2413_ufs_snapshot.h'),
+                           ('smmu_snapshot.c', mach/'opd2413_smmu_snapshot.c'),
+                           ('smmu_snapshot.h', mach/'opd2413_smmu_snapshot.h'),
                            ('serial_ramconsole.c', root/'drivers/serial/serial_opd2413_ramconsole.c'),
                            ('ramconsole_format.h', root/'drivers/serial/opd2413_ramconsole_format.h'),
                            ('observer_defconfig', root/'configs/opd2413_observer_defconfig'),
                            ('observer.env', root/'board/qualcomm/opd2413-observer.env')]:
         shutil.copyfile(overlay/source, target)
     (root/'arch/arm/dts/opd2413-observer.dts').write_text('/dts-v1/; / { model = "OPD2413 observer placeholder"; #address-cells=<2>; #size-cells=<2>; };\n')
-    replace_once(mach/'Kconfig', 'if ARCH_SNAPDRAGON\n', 'if ARCH_SNAPDRAGON\n\nconfig OPD2413_OBSERVER\n\tbool "RAM-only OPD2413 observer (no storage)"\n\tdefault n\n')
-    replace_once(mach/'Makefile', 'obj-y += dram.o', 'obj-$(CONFIG_OPD2413_OBSERVER) += opd2413_observer.o opd2413_filter.o\nobj-y += dram.o')
+    if '\nconfig OPD2413_OBSERVER\n' not in (mach/'Kconfig').read_text():
+        replace_once(mach/'Kconfig', 'if ARCH_SNAPDRAGON\n',
+                     'if ARCH_SNAPDRAGON\n\nconfig OPD2413_OBSERVER\n\tbool "RAM-only OPD2413 observer (no storage)"\n\tdefault n\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_UFS_SNAPSHOT\n\tbool "Read-only OPD2413 UFS register snapshot"\n\tdepends on OPD2413_OBSERVER\n\tdefault n\n\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_SMMU_SNAPSHOT\n\tbool "Read-only OPD2413 UFS SMMU register snapshot"\n\tdepends on OPD2413_UFS_SNAPSHOT\n\tdefault n\n\n')
+    insert_before(mach/'Makefile', 'obj-y += dram.o',
+                  'obj-$(CONFIG_OPD2413_OBSERVER) += opd2413_observer.o opd2413_filter.o\n')
+    insert_before(mach/'Makefile', 'obj-y += dram.o',
+                  'obj-$(CONFIG_OPD2413_UFS_SNAPSHOT) += opd2413_ufs_snapshot.o\n')
+    insert_before(mach/'Makefile', 'obj-y += dram.o',
+                  'obj-$(CONFIG_OPD2413_SMMU_SNAPSHOT) += opd2413_smmu_snapshot.o\n')
     replace_once(root/'drivers/serial/Makefile', 'obj-$(CONFIG_SANDBOX_SERIAL)', 'obj-$(CONFIG_OPD2413_OBSERVER) += serial_opd2413_ramconsole.o\nobj-$(CONFIG_SANDBOX_SERIAL)')
     replace_once(mach/'qcom-priv.h', 'int qcom_parse_memory(', 'int opd2413_observer_fdt(void **out);\nvoid opd2413_observer_map(void);\nint opd2413_observer_late(void);\n\nint qcom_parse_memory(')
     replace_once(mach/'board.c', 'int board_fdt_blob_setup(void **fdtp)\n{', 'int board_fdt_blob_setup(void **fdtp)\n{\n\tif (IS_ENABLED(CONFIG_OPD2413_OBSERVER)) return opd2413_observer_fdt(fdtp);')
