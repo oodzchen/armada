@@ -145,7 +145,8 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
                 qmp('pmemsave',{'val':0x880000000,'size':0x40000,'filename':str(path)})
                 try:text,_=decode(path.read_bytes(),raw=True)
                 except ValueError:time.sleep(.05);continue
-                if b'OPD2413_OBSERVER_END' not in text:time.sleep(.05);continue
+                # An EFI ResetSystem hands off to Android from inside bootefi, before END.
+                if b'OPD2413_OBSERVER_END' not in text and b'OPD2413_EFI_RESET' not in text:time.sleep(.05);continue
                 assert f'READY EL{el} '.encode() in text
                 assert b'video probe=0' in text
                 # Probe success plus non-solid physical framebuffer below;

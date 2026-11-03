@@ -26,13 +26,18 @@ def main():
     ap.add_argument('--ufs-blk', action='store_true', help='Read-only opdufs block devices with FAT/ext4 read tests (implies --ufs-wake); no writes, no EFI')
     ap.add_argument('--efi-hello', action='store_true', help='With the opdufs tests, enable the EFI loader (volatile variables only, ABL handoff memory reserved and CRC-checked) and run bootefi hello (implies --ufs-blk)')
     ap.add_argument('--efi-esp', type=Path, metavar='BOOTAA64.EFI', help='With --efi-hello: embed a FAT ESP holding this EFI program as /EFI/BOOT/BOOTAA64.EFI plus loader/loader.conf, map it with blkmap and bootefi it (implies --efi-hello)')
+    ap.add_argument('--keys', action='store_true', help='Read-only volume/power keys over SPMI as U-Boot input, with a key test step (implies --ufs-blk)')
+    ap.add_argument('--efi-menu', action='store_true', help='With --efi-esp: systemd-boot menu with an EFI hello entry and Reboot (EFI reset returns to Android), driven by the keys (implies --keys)')
     ap.add_argument('--ufs-trace', action='store_true', help='Debug with --ufs-blk: stack-frame check around doorbells after board init; a main_loop re-entry halts with no further UFS command')
     ap.add_argument('--ufs-blk-ramdisk', action='store_true', help='QEMU test only: opdufs served from a RAM extent table instead of UFS (implies --ufs-blk); never boot it on the device')
     ap.add_argument('--ufs-wake', action='store_true', help='With --ufs-read: START STOP UNIT to Active from Sleep/PowerDown, then restore and verify the original power mode (implies --ufs-read)')
     ap.add_argument('--ufs-read', action='store_true', help='Read-only LUN/capacity/GPT survey on the pre-initialized link; restores the original queue')
     a = ap.parse_args()
+    if a.efi_menu and a.efi_esp is None:
+        ap.error('--efi-menu needs --efi-esp')
+    a.keys |= a.efi_menu
     a.efi_hello |= a.efi_esp is not None
-    a.ufs_blk |= a.ufs_blk_ramdisk or a.efi_hello
+    a.ufs_blk |= a.ufs_blk_ramdisk or a.efi_hello or a.keys
     if a.ufs_trace and not a.ufs_blk:
         ap.error('--ufs-trace applies only to --ufs-blk')
     a.ufs_wake |= a.ufs_blk
@@ -68,6 +73,8 @@ def main():
                 run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_BLK_RAMDISK'], log)
             if a.ufs_trace:
                 run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_TRACE'], log)
+            if a.keys:
+                run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_KEYS'], log)
             for symbol in ['BLK', 'PARTITIONS', 'EFI_PARTITION', 'CMD_PART', 'FS_FAT', 'CMD_FAT',
                            'FS_EXT4', 'CMD_EXT4', 'CMD_FS_GENERIC', 'CMD_TIME', 'CMD_HASH', 'HUSH_PARSER', 'OPD2413_UFS_BLK']:
                 run([src/'scripts/config', '--file', out/'build/.config', '--enable', symbol], log)
@@ -77,7 +84,9 @@ def main():
                 run([src/'scripts/config', '--file', out/'build/.config', '--disable', symbol], log)
         if a.efi_hello:
             for symbol in ['EFI_LOADER', 'CMD_BOOTEFI', 'CMD_BOOTEFI_BINARY', 'BOOTEFI_HELLO_COMPILE', 'CMD_BOOTEFI_HELLO',
-                           'CMD_EFIDEBUG', 'EFI_VARIABLE_NO_STORE', 'OPD2413_EFI']:
+                           'CMD_EFIDEBUG', 'EFI_VARIABLE_NO_STORE', 'OPD2413_EFI',
+                           # EFI programs such as systemd-boot draw with ANSI escapes.
+                           'VIDEO_ANSI']:
                 run([src/'scripts/config', '--file', out/'build/.config', '--enable', symbol], log)
             # No persistent variables, capsules, time setting, TPM or network boot.
             for symbol in ['EFI_VARIABLE_FILE_STORE', 'EFI_VARIABLE_SF_STORE', 'EFI_MM_COMM_TEE', 'EFI_RT_VOLATILE_STORE',
@@ -91,10 +100,22 @@ def main():
             if a.efi_esp:
                 esp = out/'esp.img'
                 esp.unlink(missing_ok=True)
-                (out/'loader.conf').write_text('timeout 5\nconsole-mode keep\n')
                 run(['mkfs.vfat', '-C', '-n', 'OPDESP', esp, '4096'], log)
-                run(['mmd', '-i', esp, '::/EFI', '::/EFI/BOOT', '::/loader', '::/loader/entries'], log)
+                run(['mmd', '-i', esp, '::/EFI', '::/EFI/BOOT', '::/EFI/opd', '::/loader', '::/loader/entries'], log)
                 run(['mcopy', '-i', esp, a.efi_esp.resolve(), '::/EFI/BOOT/BOOTAA64.EFI'], log)
+                if a.efi_menu:
+                    # U-Boot's own hello world as a chainloaded entry; "Reboot"
+                    # (EFI ResetSystem) returns to Android and is the default.
+                    run(make + ['olddefconfig'], log)
+                    run(make + [f'-j{jobs}', 'lib/efi_loader/'], log)
+                    run(['mcopy', '-i', esp, out/'build/lib/efi_loader/helloworld.efi', '::/EFI/opd/hello.efi'], log)
+                    (out/'hello.conf').write_text('title EFI hello (returns to this menu)\nefi /EFI/opd/hello.efi\n')
+                    run(['mcopy', '-i', esp, out/'hello.conf', '::/loader/entries/hello.conf'], log)
+                    # The QEMU ramdisk build has no keys: a short timeout picks Reboot.
+                    (out/'loader.conf').write_text(f'timeout {3 if a.ufs_blk_ramdisk else 30}\ndefault auto-reboot\nauto-reboot yes\nauto-firmware no\n'
+                                                   'editor no\nconsole-mode keep\n')
+                else:
+                    (out/'loader.conf').write_text('timeout 5\nconsole-mode keep\n')
                 run(['mcopy', '-i', esp, out/'loader.conf', '::/loader/loader.conf'], log)
                 for symbol in ['BLKMAP', 'CMD_BLKMAP', 'OPD2413_EFI_ESP']:
                     run([src/'scripts/config', '--file', out/'build/.config', '--enable', symbol], log)
@@ -141,6 +162,8 @@ def main():
                 step('load', f'load opdufs 4:2d {load} /adsp/AudioSphereModule.so.1', False)
                 tests.append(f'hash crc32 {load} ${{filesize}}')
                 tests.append('echo OPD2413_BLK_TESTS_END')
+                if a.keys:
+                    step('keys', 'opd_keys 30', False)
                 if a.efi_hello:
                     # Only after the observer reserved and CRC'd the ABL handoff memory.
                     efi = []
@@ -156,8 +179,15 @@ def main():
                         efi.append(f'hash crc32 {load} ${{filesize}}')
                         # No :size, so bootefi keeps load's blkmap device path
                         # (an explicit size switches to a bare memory path).
-                        efi.append('echo OPD2413_ESP expected: systemd-boot reads the ESP, finds no entries and returns (rc=1)')
-                        step('esp_boot', f'bootefi {load}', False, efi)
+                        if a.efi_menu:
+                            keys_ok = 'test 1 = 1' if a.ufs_blk_ramdisk else 'test "${opd_keys_ok}" = 1'
+                            efi.extend([f'if {keys_ok}; then setenv stdin serial,opdkeys',
+                                        'echo OPD2413_ESP menu: Volume Up/Down move, Power selects, Reboot is the default after 30 s and returns to Android'])
+                            step('esp_boot', f'bootefi {load}', False, efi)
+                            efi.extend(['setenv stdin serial', 'else echo OPD2413_ESP menu skipped: keys not confirmed', 'fi'])
+                        else:
+                            efi.append('echo OPD2413_ESP expected: systemd-boot reads the ESP, finds no entries and returns (rc=1)')
+                            step('esp_boot', f'bootefi {load}', False, efi)
                     tests.extend(['if test "${opd_efi_safe}" = 1; then ' + efi[0], *efi[1:],
                                   'else echo OPD2413_EFI skipped: handoff memory not protected', 'fi'])
                 if a.ufs_trace:
@@ -189,7 +219,8 @@ def main():
                                 ('OPD2413_UFS_TRACE', a.ufs_trace),
                                 ('OPD2413_EFI', a.efi_hello),
                                 ('OPD2413_EFI_ESP', a.efi_esp is not None),
-                                ('BLKMAP', a.efi_esp is not None)]:
+                                ('BLKMAP', a.efi_esp is not None),
+                                ('OPD2413_KEYS', a.keys)]:
             if (f'CONFIG_{symbol}=y' in config) != enabled:
                 raise ValueError('Snapshot configuration mismatch: ' + symbol)
         # This observer cannot initialize or write storage or persistent env.
@@ -210,7 +241,7 @@ def main():
                            'EFI_HTTP_BOOT', 'CMD_NVEDIT_EFI', 'CMD_EFICONFIG']:
                 if f'CONFIG_{symbol}=y' in config:
                     raise ValueError('EFI build has a persistent or unneeded capability: ' + symbol)
-            for symbol in ['EFI_VARIABLE_NO_STORE', 'CMD_BOOTEFI_HELLO', 'OPD2413_EFI']:
+            for symbol in ['EFI_VARIABLE_NO_STORE', 'CMD_BOOTEFI_HELLO', 'OPD2413_EFI', 'VIDEO_ANSI']:
                 if f'CONFIG_{symbol}=y' not in config:
                     raise ValueError('EFI build is missing ' + symbol)
         if a.ufs_nop or a.ufs_read:
@@ -267,6 +298,10 @@ def main():
              '-I'+str(out), overlay/'ufs_read.c', overlay/'ufs_nop.c', overlay/'ufs_link.c',
              overlay/'ufs_read_test.c', '-o', out/'ufs-read-test'], log)
         run([out/'ufs-read-test'], log)
+        shutil.copyfile(overlay/'keys.h', out/'opd2413_keys.h')
+        run(['cc', '-g', '-O1', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+             '-I'+str(out), overlay/'keys.c', overlay/'keys_test.c', '-o', out/'keys-test'], log)
+        run([out/'keys-test'], log)
     print('PASS: observer built, storage disabled, ASan/UBSan FDT and memory checks passed')
     print(out/'build/u-boot-nodtb.bin')
 

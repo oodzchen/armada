@@ -30,11 +30,19 @@
 #include <env.h>
 #include <lmb.h>
 #endif
+#ifdef CONFIG_OPD2413_KEYS
+#include <env.h>
+#include <cyclic.h>
+#include <stdio_dev.h>
+#include <time.h>
+#include <vsprintf.h>
+#include "opd2413_keys.h"
+#endif
 
 DECLARE_GLOBAL_DATA_PTR;
 /* board_fdt_blob_setup runs before BSS is available. */
 static unsigned char probe_fdt[65536] __aligned(8) __section(".data") = {1};
-static struct mm_region probe_map[OPD_MAX_RANGES + 9];
+static struct mm_region probe_map[OPD_MAX_RANGES + 11];
 static u32 original_fdt_crc __section(".data") = 1;
 static u64 original_kernel_instructions __section(".data") = 1;
 #ifdef CONFIG_OPD2413_SMMU_SNAPSHOT
@@ -130,6 +138,13 @@ void opd2413_observer_map(void)
 			.size=mmio[i].size, .attrs=PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
 			PTE_BLOCK_NON_SHARE | ro | PTE_BLOCK_PXN | PTE_BLOCK_UXN};
 	}
+#endif
+#ifdef CONFIG_OPD2413_KEYS
+	/* SPMI arbiter: core read-only; EE 0 observer channels for read commands. */
+	probe_map[count++] = (struct mm_region){.phys=OPD_SPMI_CORE, .virt=OPD_SPMI_CORE, .size=OPD_SPMI_CORE_SIZE,
+		.attrs=PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) | PTE_BLOCK_NON_SHARE | PTE_BLOCK_RO | PTE_BLOCK_PXN | PTE_BLOCK_UXN};
+	probe_map[count++] = (struct mm_region){.phys=OPD_SPMI_OBS, .virt=OPD_SPMI_OBS, .size=OPD_SPMI_OBS_SIZE,
+		.attrs=PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) | PTE_BLOCK_NON_SHARE | PTE_BLOCK_PXN | PTE_BLOCK_UXN};
 #endif
 #if defined(CONFIG_OPD2413_UFS_NOP) || defined(CONFIG_OPD2413_UFS_READ)
 	/* Fixed private window inside the discarded 16 MiB U-Boot load slot.
@@ -270,6 +285,15 @@ static int chosen_u64(const void *fdt, int node, const char *name, u64 *out)
 	return 0;
 }
 
+/* EFI ResetSystem: return to Android through the checked path; on refusal
+ * the caller continues with the ordinary reset. */
+void opd2413_efi_reset_hook(int type)
+{
+	printf("OPD2413_EFI_RESET type=%d: returning to Android instead\n", type);
+	run_command("opd_android", 0);
+	printf("OPD2413_EFI_RESET Android return refused; firmware reset follows\n");
+}
+
 /* Reserve every still-free byte of [base, end) that LMB knows as memory. */
 static int protect(u64 base, u64 end, unsigned *pieces)
 {
@@ -363,6 +387,105 @@ static void efi_protect(void)
 }
 #endif
 
+#ifdef CONFIG_OPD2413_KEYS
+/*
+ * Volume up / volume down / power as an input device ("opdkeys"): up and
+ * down arrows and Enter, which U-Boot's EFI console turns into EFI keys.
+ * Only press edges after initialization count, so a key still held from the
+ * kShimC menu is ignored.
+ */
+static struct opd_keys keys;
+static int keys_ok;
+static char keyq[32];
+static unsigned keyq_head, keyq_tail;
+static ulong keys_last_us;
+
+static uint32_t keys_read32(uint64_t addr, void *ctx) { return readl((const volatile void *)(uintptr_t)addr); }
+static void keys_write32(uint64_t addr, uint32_t value, void *ctx)
+{
+	if (!opd2413_keys_write_allowed(addr, value)) panic("KEYS: invalid register write\n");
+	writel(value, (volatile void *)(uintptr_t)addr);
+}
+static void keys_sync(void *ctx) { mb(); }
+static void keys_delay(unsigned us, void *ctx) { udelay(us); }
+
+static void keyq_put(const char *s)
+{
+	for (; *s; ++s) {
+		unsigned next = (keyq_tail + 1) % sizeof(keyq);
+		if (next == keyq_head) return; /* full: drop */
+		keyq[keyq_tail] = *s; keyq_tail = next;
+	}
+}
+
+static int keys_poll_events(void)
+{
+	if (!keys_ok || timer_get_us() - keys_last_us < 5000) return 0;
+	keys_last_us = timer_get_us();
+	int edges = opd2413_keys_poll(&keys);
+	if (edges < 0) return -1;
+	if (edges & 1 << OPD_KEY_UP) keyq_put("\x1b[A");
+	if (edges & 1 << OPD_KEY_DOWN) keyq_put("\x1b[B");
+	if (edges & 1 << OPD_KEY_POWER) keyq_put("\r");
+	return edges;
+}
+
+static int keys_tstc(struct stdio_dev *dev)
+{
+	keys_poll_events();
+	return keyq_head != keyq_tail;
+}
+
+static int keys_getc(struct stdio_dev *dev)
+{
+	while (!keys_tstc(dev)) schedule();
+	char c = keyq[keyq_head];
+	keyq_head = (keyq_head + 1) % sizeof(keyq);
+	return (unsigned char)c;
+}
+
+static void keys_start(void)
+{
+	static const struct opd_ufs_io io = {keys_read32, keys_write32, keys_sync, keys_delay, NULL};
+	static struct stdio_dev dev = {.name = "opdkeys", .flags = DEV_FLAGS_INPUT, .getc = keys_getc, .tstc = keys_tstc};
+	/* The stream ID comes from the FDT, which QEMU shares; the SPMI MMIO
+	 * exists only on the tablet's Qualcomm (implementer 0x51) cores. */
+	u64 midr;
+	asm volatile("mrs %0, midr_el1" : "=r"(midr));
+	if (current_el() != 1 || original_ufs_sid != 0x60 || (midr >> 24 & 0xff) != 0x51) {
+		printf("OPD2413_KEYS skipped: unexpected EL, stream ID or CPU (midr %llx)\n", midr);
+		return;
+	}
+	if (opd2413_keys_init(&keys, &io)) return;
+	keys_ok = !stdio_register(&dev);
+	if (!keys_ok) printf("OPD2413_KEYS stdio registration failed\n");
+}
+
+/* opd_keys <seconds>: report presses until all three keys were seen. */
+static int do_opd_keys(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	static const char *const names[OPD_KEYS] = {"volume_up", "volume_down", "power"};
+	ulong seconds = argc > 1 ? dectoul(argv[1], NULL) : 20, start = get_timer(0);
+	unsigned seen = 0;
+	env_set("opd_keys_ok", "0");
+	if (!keys_ok) { printf("OPD2413_KEYS not available\n"); return CMD_RET_FAILURE; }
+	printf("OPD2413_KEYS press Volume Up, Volume Down, then Power (%lu s)\n", seconds);
+	while (seen != 7 && get_timer(start) < seconds * 1000) {
+		int edges = opd2413_keys_poll(&keys);
+		if (edges < 0) { printf("OPD2413_KEYS SPMI read failed\n"); return CMD_RET_FAILURE; }
+		for (unsigned i = 0; i < OPD_KEYS; ++i)
+			if (edges & 1 << i) { seen |= 1 << i; printf("OPD2413_KEY %s\n", names[i]); }
+		mdelay(10);
+	}
+	keyq_head = keyq_tail = 0;
+	printf("OPD2413_KEYS %s (seen mask %u)\n", seen == 7 ? "all keys work" : "timeout", seen);
+	if (seen != 7) return CMD_RET_FAILURE;
+	env_set("opd_keys_ok", "1");
+	return CMD_RET_SUCCESS;
+}
+U_BOOT_CMD(opd_keys, 2, 0, do_opd_keys, "read-only volume/power key test", "[seconds]");
+#endif
+
 int opd2413_observer_late(void)
 {
 	struct udevice *display;
@@ -378,6 +501,9 @@ int opd2413_observer_late(void)
 	printf("No storage drivers or environment writes enabled.\n");
 #ifdef CONFIG_OPD2413_EFI
 	efi_protect(); /* before the block devices register EFI disks */
+#endif
+#ifdef CONFIG_OPD2413_KEYS
+	keys_start();
 #endif
 #ifdef CONFIG_OPD2413_UFS_SNAPSHOT
 	opd2413_ufs_snapshot(snapshot_read32, NULL);

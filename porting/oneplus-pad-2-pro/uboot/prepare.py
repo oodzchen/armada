@@ -45,6 +45,8 @@ def main():
                            ('ufs_read.h', mach/'opd2413_ufs_read.h'),
                            ('ufs_blk.c', mach/'opd2413_ufs_blk.c'),
                            ('ufs_blk.h', mach/'opd2413_ufs_blk.h'),
+                           ('keys.c', mach/'opd2413_keys.c'),
+                           ('keys.h', mach/'opd2413_keys.h'),
                            ('serial_ramconsole.c', root/'drivers/serial/serial_opd2413_ramconsole.c'),
                            ('ramconsole_format.h', root/'drivers/serial/opd2413_ramconsole_format.h'),
                            ('observer_defconfig', root/'configs/opd2413_observer_defconfig'),
@@ -89,6 +91,10 @@ def main():
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n', blk_new)
     insert_before(mach/'Makefile', 'obj-y += dram.o', 'obj-$(CONFIG_OPD2413_UFS_BLK) += opd2413_ufs_blk.o\n')
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_KEYS\n\tbool "Read-only volume/power keys over the SPMI arbiter as input"\n'
+                  '\tdepends on OPD2413_UFS_BLK\n\tdefault n\n\n')
+    insert_before(mach/'Makefile', 'obj-y += dram.o', 'obj-$(CONFIG_OPD2413_KEYS) += opd2413_keys.o\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
                   'config OPD2413_EFI_ESP\n\tbool "Embed a FAT ESP image for blkmap (read-only use)"\n'
                   '\tdepends on OPD2413_EFI && BLKMAP\n\tdefault n\n\n'
                   'config OPD2413_EFI_ESP_IMAGE\n\tstring "Path of the embedded ESP image"\n'
@@ -99,6 +105,15 @@ def main():
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
                   'config OPD2413_UFS_TRACE\n\tbool "Debug: stack-frame check around UFS doorbells issued after board init"\n'
                   '\tdepends on OPD2413_UFS_READ\n\tdefault n\n\n')
+    # EFI ResetSystem (e.g. systemd-boot "Reboot The System") first tries the
+    # observer's checked return to Android, then falls back to the reset.
+    replace_once(root/'lib/efi_loader/efi_runtime.c',
+                 '\t\t\tbreak;\n\t\t}\n\t}\n\tswitch (reset_type) {\n\tcase EFI_RESET_COLD:\n',
+                 '\t\t\tbreak;\n\t\t}\n\t}\n'
+                 '#ifdef CONFIG_OPD2413_EFI\n'
+                 '\t{ extern void opd2413_efi_reset_hook(int type); opd2413_efi_reset_hook(reset_type); }\n'
+                 '#endif\n'
+                 '\tswitch (reset_type) {\n\tcase EFI_RESET_COLD:\n')
     # Report every main_loop entry (re-entry diagnosis); other configs of this
     # checkout, such as sandbox, are unaffected.
     hook_old = ('\tbootstage_mark_name(BOOTSTAGE_ID_MAIN_LOOP, "main_loop");\n'
