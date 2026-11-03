@@ -17,7 +17,12 @@ The Retroid Pocket Duo (SM7750) uses the SM8750 image.
 
 ## Update policy
 
-Updates are always on. At shutdown, each ABL copy is checked in this order:
+Updates run on devices with Armada-managed ABL. A device profile can set
+`ARMADA_ABL_MANAGED=0` to preserve an OEM-signed bootloader. Both the updater
+and shutdown finalizer then exit before accessing ABL partitions. The OnePlus
+Pad 2 Pro is also explicitly excluded by device ID, independently of this flag.
+
+On managed devices, each ABL copy is checked in this order at shutdown:
 
 1. **Already the packaged image:** nothing to do.
 2. **Listed in `legacy-releases.tsv`:** the hash decides, whatever the firmware
