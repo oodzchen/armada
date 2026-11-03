@@ -89,6 +89,11 @@ def main():
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n', blk_new)
     insert_before(mach/'Makefile', 'obj-y += dram.o', 'obj-$(CONFIG_OPD2413_UFS_BLK) += opd2413_ufs_blk.o\n')
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_EFI_ESP\n\tbool "Embed a FAT ESP image for blkmap (read-only use)"\n'
+                  '\tdepends on OPD2413_EFI && BLKMAP\n\tdefault n\n\n'
+                  'config OPD2413_EFI_ESP_IMAGE\n\tstring "Path of the embedded ESP image"\n'
+                  '\tdepends on OPD2413_EFI_ESP\n\tdefault ""\n\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
                   'config OPD2413_EFI\n\tbool "Reserve the ABL handoff memory and allow bootefi"\n'
                   '\tdepends on OPD2413_UFS_BLK && EFI_LOADER\n\tdefault n\n\n')
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',

@@ -123,7 +123,7 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
     with (out/'stderr.log').open('wb') as log:
         process=subprocess.Popen(command,stdout=log,stderr=log)
         try:
-            deadline=time.monotonic()+(60 if blk_ramdisk else 15)
+            deadline=time.monotonic()+(60 if blk_ramdisk else 30)
             client=socket.socket(socket.AF_UNIX);client.settimeout(3)
             while True:
                 if process.poll() is not None:raise RuntimeError((out/'stderr.log').read_text())

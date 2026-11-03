@@ -254,6 +254,13 @@ void opd2413_ufs_trace(int phase, uint8_t op, uint8_t lun)
 static u64 abl_end __section(".data");
 static u32 abl_crc __section(".data");
 
+#ifdef CONFIG_OPD2413_EFI_ESP
+/* FAT ESP image built by build.py --efi-esp, exposed through blkmap. */
+asm(".section .rodata.opd2413_esp, \"a\"\n.balign 4096\n.global opd2413_esp_start\nopd2413_esp_start:\n"
+    ".incbin \"" CONFIG_OPD2413_EFI_ESP_IMAGE "\"\n.balign 512\n.global opd2413_esp_end\nopd2413_esp_end:\n.previous\n");
+extern const char opd2413_esp_start[], opd2413_esp_end[];
+#endif
+
 static int chosen_u64(const void *fdt, int node, const char *name, u64 *out)
 {
 	int len;
@@ -346,6 +353,13 @@ static void efi_protect(void)
 	printf("OPD2413_EFI_PROTECT abl=%llx-%llx initrd=%llx-%llx crc=%08x pieces=%u\n",
 	       OPD_ABL_BASE, abl_end, rd_start, rd_end, abl_crc, pieces);
 	env_set("opd_efi_safe", "1");
+#ifdef CONFIG_OPD2413_EFI_ESP
+	size_t esp = opd2413_esp_end - opd2413_esp_start;
+	env_set_hex("opd_esp_addr", (ulong)opd2413_esp_start);
+	env_set_hex("opd_esp_blocks", esp / 512);
+	printf("OPD2413_EFI_ESP addr=%p size=%zu crc=%08x\n", opd2413_esp_start, esp,
+	       crc32(0, (const void *)opd2413_esp_start, esp));
+#endif
 }
 #endif
 

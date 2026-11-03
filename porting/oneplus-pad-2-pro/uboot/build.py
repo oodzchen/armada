@@ -25,11 +25,13 @@ def main():
     ap.add_argument('--halt-on-failure', action='store_true', help='Debug: if the Android return is refused, stay on screen instead of the firmware reset that loses the RAM log')
     ap.add_argument('--ufs-blk', action='store_true', help='Read-only opdufs block devices with FAT/ext4 read tests (implies --ufs-wake); no writes, no EFI')
     ap.add_argument('--efi-hello', action='store_true', help='With the opdufs tests, enable the EFI loader (volatile variables only, ABL handoff memory reserved and CRC-checked) and run bootefi hello (implies --ufs-blk)')
+    ap.add_argument('--efi-esp', type=Path, metavar='BOOTAA64.EFI', help='With --efi-hello: embed a FAT ESP holding this EFI program as /EFI/BOOT/BOOTAA64.EFI plus loader/loader.conf, map it with blkmap and bootefi it (implies --efi-hello)')
     ap.add_argument('--ufs-trace', action='store_true', help='Debug with --ufs-blk: stack-frame check around doorbells after board init; a main_loop re-entry halts with no further UFS command')
     ap.add_argument('--ufs-blk-ramdisk', action='store_true', help='QEMU test only: opdufs served from a RAM extent table instead of UFS (implies --ufs-blk); never boot it on the device')
     ap.add_argument('--ufs-wake', action='store_true', help='With --ufs-read: START STOP UNIT to Active from Sleep/PowerDown, then restore and verify the original power mode (implies --ufs-read)')
     ap.add_argument('--ufs-read', action='store_true', help='Read-only LUN/capacity/GPT survey on the pre-initialized link; restores the original queue')
     a = ap.parse_args()
+    a.efi_hello |= a.efi_esp is not None
     a.ufs_blk |= a.ufs_blk_ramdisk or a.efi_hello
     if a.ufs_trace and not a.ufs_blk:
         ap.error('--ufs-trace applies only to --ufs-blk')
@@ -86,6 +88,17 @@ def main():
                            'EFI_SECURE_BOOT', 'CMD_NVEDIT_EFI', 'CMD_EFICONFIG',
                            'CMD_BOOTEFI_SELFTEST', 'EFI_BOOTMGR']:
                 run([src/'scripts/config', '--file', out/'build/.config', '--disable', symbol], log)
+            if a.efi_esp:
+                esp = out/'esp.img'
+                esp.unlink(missing_ok=True)
+                (out/'loader.conf').write_text('timeout 5\nconsole-mode keep\n')
+                run(['mkfs.vfat', '-C', '-n', 'OPDESP', esp, '4096'], log)
+                run(['mmd', '-i', esp, '::/EFI', '::/EFI/BOOT', '::/loader', '::/loader/entries'], log)
+                run(['mcopy', '-i', esp, a.efi_esp.resolve(), '::/EFI/BOOT/BOOTAA64.EFI'], log)
+                run(['mcopy', '-i', esp, out/'loader.conf', '::/loader/loader.conf'], log)
+                for symbol in ['BLKMAP', 'CMD_BLKMAP', 'OPD2413_EFI_ESP']:
+                    run([src/'scripts/config', '--file', out/'build/.config', '--enable', symbol], log)
+                run([src/'scripts/config', '--file', out/'build/.config', '--set-str', 'OPD2413_EFI_ESP_IMAGE', esp], log)
         if a.ufs_nop or a.ufs_link_check or a.ufs_read:
             # Keep the probe result visible during the countdown instead of
             # scrolling it away with the long bdinfo memory-bank listing.
@@ -133,6 +146,18 @@ def main():
                     efi = []
                     step('efi_memmap', 'efidebug memmap', True, efi)
                     step('efi_hello', 'bootefi hello', False, efi)
+                    if a.efi_esp:
+                        # The embedded ESP as a RAM block device; systemd-boot
+                        # is loaded from it so its volume is that ESP.
+                        efi.extend(['blkmap create esp', 'blkmap map esp 0 ${opd_esp_blocks} mem ${opd_esp_addr}',
+                                    'blkmap get esp dev opd_esp_dev'])
+                        step('esp_ls', 'ls blkmap ${opd_esp_dev} /EFI/BOOT', False, efi)
+                        step('esp_load', f'load blkmap ${{opd_esp_dev}} {load} /EFI/BOOT/BOOTAA64.EFI', False, efi)
+                        efi.append(f'hash crc32 {load} ${{filesize}}')
+                        # No :size, so bootefi keeps load's blkmap device path
+                        # (an explicit size switches to a bare memory path).
+                        efi.append('echo OPD2413_ESP expected: systemd-boot reads the ESP, finds no entries and returns (rc=1)')
+                        step('esp_boot', f'bootefi {load}', False, efi)
                     tests.extend(['if test "${opd_efi_safe}" = 1; then ' + efi[0], *efi[1:],
                                   'else echo OPD2413_EFI skipped: handoff memory not protected', 'fi'])
                 if a.ufs_trace:
@@ -162,7 +187,9 @@ def main():
                                 ('OPD2413_UFS_BLK', a.ufs_blk),
                                 ('OPD2413_UFS_BLK_RAMDISK', a.ufs_blk_ramdisk),
                                 ('OPD2413_UFS_TRACE', a.ufs_trace),
-                                ('OPD2413_EFI', a.efi_hello)]:
+                                ('OPD2413_EFI', a.efi_hello),
+                                ('OPD2413_EFI_ESP', a.efi_esp is not None),
+                                ('BLKMAP', a.efi_esp is not None)]:
             if (f'CONFIG_{symbol}=y' in config) != enabled:
                 raise ValueError('Snapshot configuration mismatch: ' + symbol)
         # This observer cannot initialize or write storage or persistent env.
@@ -186,6 +213,17 @@ def main():
             for symbol in ['EFI_VARIABLE_NO_STORE', 'CMD_BOOTEFI_HELLO', 'OPD2413_EFI']:
                 if f'CONFIG_{symbol}=y' not in config:
                     raise ValueError('EFI build is missing ' + symbol)
+        if a.ufs_nop or a.ufs_read:
+            # The image and the pre-relocation stack (SYS_INIT_SP_BSS_OFFSET above
+            # __bss_end, used downwards) must stay clear of the UFS DMA window.
+            dma, dma_end = 0xb9800000, 0xb9810000
+            syms = {l.split()[2]: int(l.split()[0], 16) for l in subprocess.run(
+                ['aarch64-linux-gnu-nm', out/'build/u-boot'], check=True, capture_output=True, text=True).stdout.splitlines()
+                if len(l.split()) == 3}
+            offset = next(int(l.split('=')[1], 16) for l in config if l.startswith('CONFIG_SYS_INIT_SP_BSS_OFFSET='))
+            sp = syms['__bss_end'] + offset
+            if syms['__bss_end'] > dma or (sp > dma and sp - 0x40000 < dma_end):
+                raise ValueError(f'U-Boot image or early stack overlaps the DMA window (bss_end={syms["__bss_end"]:#x}, sp={sp:#x})')
         if 'CONFIG_ENV_IS_NOWHERE=y' not in config:
             raise ValueError('Observer environment must stay in RAM')
         shutil.copyfile(overlay/'layout.h', out/'opd2413_layout.h')
