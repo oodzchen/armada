@@ -139,7 +139,11 @@ Description=OPD2413 test: a host connection to port 5009 ends the test window
 After=opd-httpd.service
 
 [Service]
-ExecStart=/etc/opd/busybox sh -c '/etc/opd/busybox nc -l -p 5009 < /dev/null > /run/opd-www/host-request.txt && exec /usr/bin/systemctl start opd-return.service'
+# busybox nc cannot bind an address, and the system may also be on Wi-Fi:
+# listen on the NCM address only and record who asked.
+ExecStart=/usr/bin/python3 -c "import socket, subprocess; s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('10.231.0.1', 5009)); s.listen(1); c, peer = s.accept(); data = c.recv(4096); c.close(); open('/run/opd-www/host-request.txt', 'w').write(repr(peer) + ' ' + data.decode(errors='replace')); subprocess.run(['systemctl', 'start', 'opd-return.service'])"
+Restart=on-failure
+RestartSec=2
 ''',
 }
 
