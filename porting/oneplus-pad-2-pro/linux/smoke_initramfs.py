@@ -53,7 +53,14 @@ snapshot() {
 			echo "$(basename $f).first240=$(head -c 240 $f | hexdump -v -e '/1 "%02x"')"
 		done
 		dmesg | grep -E 'nt36536.*(firmware|resume|chip id|fw_ver)' | tail -n 6
-		dmesg | grep -Ei 'remoteproc|dwc3|usb |scmi|ucsi|glink|typec|wcd939' | tail -n 60
+		for f in /sys/class/udc/*/current_speed /sys/class/udc/*/maximum_speed; do
+			[ -r "$f" ] && echo "$f=$(cat $f)"
+		done
+		for f in /run/www/results.txt /run/ncm-host-verdict.txt; do
+			[ -r "$f" ] && { echo "$f:"; cat "$f"; }
+		done
+		[ -e /run/www ] && ip -s link
+		dmesg | grep -Ei 'remoteproc|dwc3|usb |scmi|ucsi|glink|typec|wcd939|ncm|usb0|gadget' | tail -n 60
 	} > /run/smoke-state
 	digest=$(sha256sum /run/smoke-state | cut -d ' ' -f 1)
 	length=$(wc -c < /run/smoke-state)
@@ -102,11 +109,13 @@ for e in /sys/class/input/event*; do
 	fi
 done
 snapshot initial
-say "==== OPD2413_LINUX_SMOKE: rebooting in 120 s (PSCI reset, back to Android) ===="
-i=120
+# NCM_TEST_HOOK
+say "==== OPD2413_LINUX_SMOKE: rebooting in @WAIT@ s (PSCI reset, back to Android) ===="
+i=@WAIT@
 while [ $i -gt 0 ]; do
+	[ -e /run/ncm-done ] && { say 'NCM test finished; rebooting early'; break; }
 	[ $((i % 10)) -eq 0 ] && say "reboot in $i s"
-	[ $i -eq 100 ] && snapshot settled
+	[ $i -eq $((@WAIT@ - 20)) ] && snapshot settled
 	sleep 1
 	i=$((i - 1))
 done
@@ -115,9 +124,9 @@ say "rebooting"
 reboot -f
 '''
 
-USB_LOG = r'''
-# Output only: stream kernel messages to the host through a RAM ACM gadget.
-usb_log() {
+USB_GADGET = r'''
+# A RAM-only USB gadget: an output-only ACM kernel log and/or the NCM test link.
+usb_gadget() {
 	mount -t configfs configfs /sys/kernel/config || return
 	g=/sys/kernel/config/usb_gadget/opd-smoke
 	mkdir -p "$g" || return
@@ -127,27 +136,84 @@ usb_log() {
 	echo armada-opd-smoke > "$g/strings/0x409/serialnumber"
 	echo Armada > "$g/strings/0x409/manufacturer"
 	echo 'OPD2413 RAM kernel log' > "$g/strings/0x409/product"
-	echo 'ACM log' > "$g/configs/c.1/strings/0x409/configuration"
+	echo '@FUNCTIONS@' > "$g/configs/c.1/strings/0x409/configuration"
 	echo 100 > "$g/configs/c.1/MaxPower"
-	mkdir "$g/functions/acm.GS0" || return
-	ln -s "$g/functions/acm.GS0" "$g/configs/c.1/acm.GS0" || return
-	i=0
+@FUNCTION_SETUP@	i=0
 	while [ $i -lt 30 ]; do
 		set -- /sys/class/udc/*
 		if [ -e "$1" ]; then
 			[ $# -eq 1 ] || { say 'USB log: ambiguous UDC'; return; }
 			udc=$(basename "$1")
 			echo "$udc" > "$g/UDC" || return
-			say "USB log: bound to $udc"
-			cat /dev/kmsg > /dev/ttyGS0
+			say "USB gadget: bound to $udc"
+			[ -e "$g/functions/acm.GS0" ] && cat /dev/kmsg > /dev/ttyGS0
 			return
 		fi
 		sleep 1
 		i=$((i + 1))
 	done
-	say 'USB log: no UDC after 30 s'
+	say 'USB gadget: no UDC after 30 s'
 }
-usb_log &
+usb_gadget &
+'''
+
+ACM_SETUP = r'''	mkdir "$g/functions/acm.GS0" || return
+	ln -s "$g/functions/acm.GS0" "$g/configs/c.1/acm.GS0" || return
+'''
+
+# Fixed, locally administered MACs let the host bind a profile to this link only.
+NCM_DEVICE_MAC = '02:4f:50:44:00:01'
+NCM_HOST_MAC = '02:4f:50:44:00:02'
+
+NCM_SETUP = r'''	mkdir "$g/functions/ncm.usb0" || return
+	echo @DEVICE_MAC@ > "$g/functions/ncm.usb0/dev_addr" || return
+	echo @HOST_MAC@ > "$g/functions/ncm.usb0/host_addr" || return
+	ln -s "$g/functions/ncm.usb0" "$g/configs/c.1/ncm.usb0" || return
+'''
+
+NCM_TEST = r'''
+# Point-to-point USB NCM transfer test (10.231.0.1 here, 10.231.0.2 on the host).
+# The host opens every connection. Received data stays in RAM; only lengths and
+# SHA-256 digests (whole file and per 64 MiB chunk) are reported back.
+ncm_dev=
+R=/run/www/results.txt
+chunk_sums() {
+	size=$(wc -c < "$1")
+	echo "$2 bytes=$size sha256=$(sha256sum "$1" | cut -d ' ' -f 1)" >> $R
+	n=0
+	while [ $((n * 67108864)) -lt $size ]; do
+		echo "$2 chunk=$n sha256=$(dd if="$1" bs=1048576 skip=$((n * 64)) count=64 2>/dev/null | sha256sum | cut -d ' ' -f 1)" >> $R
+		n=$((n + 1))
+	done
+}
+ncm_test() {
+	i=0
+	while [ -z "$ncm_dev" ] && [ $i -lt 40 ]; do
+		for n in /sys/class/net/*; do
+			[ "$(cat $n/address 2>/dev/null)" = @DEVICE_MAC@ ] && ncm_dev=$(basename $n)
+		done
+		[ -n "$ncm_dev" ] || sleep 1
+		i=$((i + 1))
+	done
+	[ -n "$ncm_dev" ] || { say 'NCM: no interface after 40 s'; return; }
+	mkdir -p /run/www
+	dd if=/dev/urandom of=/run/www/tx.bin bs=1048576 count=@TX_MIB@ 2>/dev/null
+	chunk_sums /run/www/tx.bin tx
+	ip link set "$ncm_dev" up && ip addr add 10.231.0.1/24 dev "$ncm_dev" || { say "NCM: cannot configure $ncm_dev"; return; }
+	httpd -p 10.231.0.1:80 -h /run/www || { say 'NCM: httpd failed'; return; }
+	say "NCM: $ncm_dev up at 10.231.0.1, speed $(cat /sys/class/udc/*/current_speed 2>/dev/null)"
+	for label in small large; do
+		nc -l -p 5001 < /dev/null > /run/rx-$label.bin || say "NCM: $label receive failed"
+		chunk_sums /run/rx-$label.bin $label
+		echo "$label done" >> $R
+		say "NCM: $(grep "^$label bytes=" $R)"
+		rm -f /run/rx-$label.bin
+	done
+	nc -l -p 5009 < /dev/null > /run/ncm-host-verdict.txt
+	say "NCM host verdict: $(head -c 200 /run/ncm-host-verdict.txt)"
+	touch /run/ncm-done
+}
+ncm_test &
 '''
 
 
@@ -167,6 +233,12 @@ def main():
                     help='zstd requires host zstd and kernel CONFIG_RD_ZSTD=y')
     ap.add_argument('--usb-log', action='store_true',
                     help='Start an output-only ACM kernel log gadget (CONFIG_USB_CONFIGFS_ACM=y)')
+    ap.add_argument('--usb-ncm', action='store_true',
+                    help='Add the NCM transfer test (CONFIG_USB_CONFIGFS_NCM=y); ends the wait early')
+    ap.add_argument('--ncm-tx-mib', type=int, default=256,
+                    help='Random data the tablet generates for the host to download')
+    ap.add_argument('--wait', type=int, default=120,
+                    help='Seconds before the PSCI reset back to Android')
     ap.add_argument('--firmware', action='append', default=[], metavar='NAME=SHA256=FILE',
                     help='Add a hash-verified private firmware file under /lib/firmware (repeatable)')
     a = ap.parse_args()
@@ -195,7 +267,20 @@ def main():
     blob += entry('dev/console', 0o20600, ino=ino, rdev=(5, 1)); ino += 1
     blob += entry('dev/tty0', 0o20620, ino=ino, rdev=(4, 0)); ino += 1
     blob += entry('bin/busybox', 0o100755, a.busybox.read_bytes(), ino=ino); ino += 1
-    init = INIT.replace('# USB_LOG_HOOK', USB_LOG if a.usb_log else '')
+    if a.wait < 30 or not 1 <= a.ncm_tx_mib <= 4096:
+        raise ValueError('--wait must be at least 30 s and --ncm-tx-mib 1..4096')
+    functions = ([('ACM log', ACM_SETUP)] if a.usb_log else []) + \
+                ([('NCM test', NCM_SETUP)] if a.usb_ncm else [])
+    gadget = ''
+    if functions:
+        gadget = USB_GADGET.replace('@FUNCTIONS@', ' + '.join(name for name, _ in functions)) \
+                           .replace('@FUNCTION_SETUP@', ''.join(setup for _, setup in functions))
+    init = INIT.replace('# USB_LOG_HOOK', gadget) \
+               .replace('# NCM_TEST_HOOK', NCM_TEST if a.usb_ncm else '') \
+               .replace('@WAIT@', str(a.wait)) \
+               .replace('@TX_MIB@', str(a.ncm_tx_mib)) \
+               .replace('@DEVICE_MAC@', NCM_DEVICE_MAC).replace('@HOST_MAC@', NCM_HOST_MAC)
+    assert '@' not in init.replace('$@', ''), 'unreplaced placeholder'
     blob += entry('init', 0o100755, init.encode(), ino=ino); ino += 1
     blob += entry('TRAILER!!!', 0)
     if a.compression == 'zstd':
