@@ -339,3 +339,7 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 1400-opd2413-display-panel-and-backlight.patch
 1401-opd2413-nt36536-and-pogo-input.patch
 1402-opd2413-sm8750-board-resources.patch
+# OPD2413 display bring-up: panel retry, DSI PLL error path, stalled-transfer report
+1403-opd2413-nt36536-panel-prepare-retry.patch
+1404-drm-msm-dsi-phy-7nm-undo-failed-pll-start.patch
+1405-drm-msm-dsi-report-stalled-command-transfers.patch

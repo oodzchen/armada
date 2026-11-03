@@ -1,0 +1,18 @@
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+@@ -513,6 +513,15 @@
+ 	rc = dsi_pll_7nm_lock_status(pll_7nm);
+ 	if (rc) {
+ 		pr_err("PLL(%d) lock failed\n", pll_7nm->phy->id);
++		/*
++		 * Undo the start: a failed prepare is never unprepared, so leaving
++		 * the PLL running unconfigured and the bias votes taken keeps the
++		 * PHY in a half-started state for the next real enable.
++		 */
++		writel(0, pll_7nm->phy->base + REG_DSI_7nm_PHY_CMN_PLL_CNTRL);
++		if (pll_7nm->slave)
++			dsi_pll_disable_pll_bias(pll_7nm->slave);
++		dsi_pll_disable_pll_bias(pll_7nm);
+ 		goto error;
+ 	}
+ 

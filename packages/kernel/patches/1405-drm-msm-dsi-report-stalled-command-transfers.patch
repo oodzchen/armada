@@ -1,0 +1,92 @@
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -1461,6 +1461,27 @@
+ 	return 0;
+ }
+ 
++/* OPD2413 diagnostics: DSI link state when a command transfer stalls. */
++void msm_dsi_host_dump_regs(struct mipi_dsi_host *host, const char *why)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++
++	if (!msm_host->power_on) {
++		pr_err("dsi%d %s: link powered off\n", msm_host->id, why);
++		return;
++	}
++	pr_err("dsi%d %s: ctrl=%08x status0=%08x intr=%08x fifo=%08x ack=%08x tmo=%08x clk=%08x dln0=%08x\n",
++	       msm_host->id, why,
++	       dsi_read(msm_host, REG_DSI_CTRL),
++	       dsi_read(msm_host, REG_DSI_STATUS0),
++	       dsi_read(msm_host, REG_DSI_INTR_CTRL),
++	       dsi_read(msm_host, REG_DSI_FIFO_STATUS),
++	       dsi_read(msm_host, REG_DSI_ACK_ERR_STATUS),
++	       dsi_read(msm_host, REG_DSI_TIMEOUT_STATUS),
++	       dsi_read(msm_host, REG_DSI_CLK_STATUS),
++	       dsi_read(msm_host, REG_DSI_DLN0_PHY_ERR));
++}
++
+ static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len)
+ {
+ 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+@@ -1484,10 +1505,14 @@
+ 		ret = wait_for_completion_timeout(&msm_host->dma_comp,
+ 					msecs_to_jiffies(200));
+ 		DBG("ret=%d", ret);
+-		if (ret == 0)
++		if (ret == 0) {
++			/* OPD2413: record where a stalled command transfer stopped. */
++			msm_dsi_host_dump_regs(&msm_host->base, "cmd dma timeout");
++			msm_dsi_manager_dump_other(msm_host->id);
+ 			ret = -ETIMEDOUT;
+-		else
++		} else {
+ 			ret = len;
++		}
+ 	} else {
+ 		ret = len;
+ 	}
+@@ -2248,8 +2273,14 @@
+ 	 */
+ 	if (!(msm_host->power_on && msm_host->enabled) ||
+ 	    !of_machine_is_compatible("qcom,sm8250")) {
++		int ret;
++
+ 		cfg_hnd->ops->link_clk_set_rate(msm_host);
+-		cfg_hnd->ops->link_clk_enable(msm_host);
++		ret = cfg_hnd->ops->link_clk_enable(msm_host);
++		if (ret)
++			/* OPD2413: a link that cannot clock stalls a bonded transfer. */
++			pr_err("dsi%d: link clocks failed to enable for transfer: %d\n",
++			       msm_host->id, ret);
+ 	}
+ 
+ 	/* TODO: vote for bus bandwidth */
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -44,6 +44,15 @@
+ 	return msm_dsim_glb.dsi[(id + 1) % DSI_MAX];
+ }
+ 
++/* OPD2413 diagnostics: dump the bonded partner link of a stalled transfer. */
++void msm_dsi_manager_dump_other(int id)
++{
++	struct msm_dsi *other = dsi_mgr_get_other_dsi(id);
++
++	if (IS_BONDED_DSI() && other && other->host)
++		msm_dsi_host_dump_regs(other->host, "partner of stalled link");
++}
++
+ static int dsi_mgr_parse_of(struct device_node *np, int id)
+ {
+ 	struct msm_dsi_manager *msm_dsim = &msm_dsim_glb;
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -68,6 +68,8 @@
+ 					const struct mipi_dsi_msg *msg);
+ void msm_dsi_host_cmd_xfer_commit(struct mipi_dsi_host *host,
+ 					u32 dma_base, u32 len);
++void msm_dsi_host_dump_regs(struct mipi_dsi_host *host, const char *why);
++void msm_dsi_manager_dump_other(int id);
+ int msm_dsi_host_enable(struct mipi_dsi_host *host);
+ int msm_dsi_host_disable(struct mipi_dsi_host *host);
+ void msm_dsi_host_enable_irq(struct mipi_dsi_host *host);

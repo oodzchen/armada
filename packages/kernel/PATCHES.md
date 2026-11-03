@@ -1222,3 +1222,35 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: armada
   upstream: local
   notes: Add configurable ADC references and share reset and supply sequencing between probe and resume; existing board defaults are retained.
+
+## OnePlus Pad 2 Pro / OPD2413
+
+- `patches/1400-opd2413-display-panel-and-backlight.patch`
+  source: https://github.com/yzddmr6/linux-sm8750-erhai/tree/70b572544d504735e2924f6c3f5fe3bd726ef275
+  upstream: unknown
+  notes: Selected final changes relative to v7.2.14, adapted to Armada 7.2.6. Existing Armada GPU nodes, CPU capacities, UART15 pin state and display modifications are retained; duplicate and already-present changes are omitted. Camera, charging, audio and GPU driver extensions from erhai are not included in this initial display/input port.
+- `patches/1401-opd2413-nt36536-and-pogo-input.patch`
+  source: https://github.com/yzddmr6/linux-sm8750-erhai/tree/70b572544d504735e2924f6c3f5fe3bd726ef275
+  upstream: unknown
+  notes: Selected final changes relative to v7.2.14, adapted to Armada 7.2.6. Existing Armada GPU nodes, CPU capacities, UART15 pin state and display modifications are retained; duplicate and already-present changes are omitted. Camera, charging, audio and GPU driver extensions from erhai are not included in this initial display/input port.
+- `patches/1402-opd2413-sm8750-board-resources.patch`
+  source: https://github.com/yzddmr6/linux-sm8750-erhai/tree/70b572544d504735e2924f6c3f5fe3bd726ef275
+  upstream: unknown
+  notes: Selected final changes relative to v7.2.14, adapted to Armada 7.2.6. Existing Armada GPU nodes, CPU capacities, UART15 pin state and display modifications are retained; duplicate and already-present changes are omitted. Camera, charging, audio and GPU driver extensions from erhai are not included in this initial display/input port.
+
+- `dts/sm8750-oneplus-pad2pro.dts`
+  source: https://github.com/yzddmr6/linux-sm8750-erhai/blob/70b572544d504735e2924f6c3f5fe3bd726ef275/arch/arm64/boot/dts/qcom/sm8750-erhai.dts
+  upstream: unknown
+  notes: Board description vendored verbatim under the Armada DTB name. Device nodes alone do not imply that all peripherals have ported drivers or hardware validation.
+- `patches/1403-opd2413-nt36536-panel-prepare-retry.patch`
+  source: armada
+  upstream: local
+  notes: Power-cycle and retry the panel on-sequence up to three times. On OPD2413 roughly one boot in three stalls the first bonded DSI command; the retry recovers a panel that missed the sequence and reports a host-side stall, which currently persists across retries (see porting/oneplus-pad-2-pro plan §19.13).
+- `patches/1404-drm-msm-dsi-phy-7nm-undo-failed-pll-start.patch`
+  source: armada
+  upstream: not yet submitted
+  notes: When the PLL fails to lock in vco_prepare, stop it and drop the bias votes taken for it and its bonded slave. The clock core does not unprepare a failed prepare, so the PLL was left started without configuration and the bias count grew on every early reparent attempt.
+- `patches/1405-drm-msm-dsi-report-stalled-command-transfers.patch`
+  source: armada
+  upstream: local
+  notes: On a command DMA timeout, log the control, status, FIFO, error and clock status registers of the stalled link and of its bonded partner, and report link clocks that fail to enable for a transfer. Only error paths print.
