@@ -36,6 +36,8 @@ def main():
                     help='Additional entry with the same --linux kernel and initrd (repeatable)')
     ap.add_argument('--esp-default', default='auto-reboot', help='systemd-boot default entry id (e.g. linux.conf for an unattended QEMU run)')
     ap.add_argument('--keys', action='store_true', help='Read-only volume/power keys over SPMI as U-Boot input, with a key test step (implies --ufs-blk)')
+    ap.add_argument('--unattended', action='store_true',
+                    help='Skip the three-key confirmation so the systemd-boot default entry boots unattended (test images only)')
     ap.add_argument('--efi-menu', action='store_true', help='With --efi-esp: systemd-boot menu with an EFI hello entry and Reboot (EFI reset returns to Android), driven by the keys (implies --keys)')
     ap.add_argument('--ufs-trace', action='store_true', help='Debug with --ufs-blk: stack-frame check around doorbells after board init; a main_loop re-entry halts with no further UFS command')
     ap.add_argument('--ufs-blk-ramdisk', action='store_true', help='QEMU test only: opdufs served from a RAM extent table instead of UFS (implies --ufs-blk); never boot it on the device')
@@ -194,7 +196,7 @@ def main():
                 step('load', f'load opdufs 4:2d {load} /adsp/AudioSphereModule.so.1', False)
                 tests.append(f'hash crc32 {load} ${{filesize}}')
                 tests.append('echo OPD2413_BLK_TESTS_END')
-                if a.keys:
+                if a.keys and not a.unattended:
                     step('keys', 'opd_keys 30', False)
                 if a.efi_hello:
                     # Only after the observer reserved and CRC'd the ABL handoff memory.
@@ -212,7 +214,9 @@ def main():
                         # No :size, so bootefi keeps load's blkmap device path
                         # (an explicit size switches to a bare memory path).
                         if a.efi_menu:
-                            keys_ok = 'test 1 = 1' if a.ufs_blk_ramdisk else 'test "${opd_keys_ok}" = 1'
+                            # Unattended images skip the three-key confirmation;
+                            # systemd-boot's default entry then boots on its own.
+                            keys_ok = 'test 1 = 1' if a.ufs_blk_ramdisk or a.unattended else 'test "${opd_keys_ok}" = 1'
                             efi.extend([f'if {keys_ok}; then setenv stdin serial,opdkeys',
                                         'echo OPD2413_ESP menu: Volume Up/Down move, Power selects, Reboot is the default after 30 s and returns to Android'])
                             step('esp_boot', f'bootefi {load}', False, efi)

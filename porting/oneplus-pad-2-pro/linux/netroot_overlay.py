@@ -171,6 +171,10 @@ def main():
     ap.add_argument('--return-after', type=int, default=600, help='seconds after boot')
     ap.add_argument('--mask', action='append', default=[], metavar='UNIT',
                     help='Unit to mask (repeatable); must exist in the image')
+    ap.add_argument('--no-ncm', action='store_true',
+                    help='USB-disk boots: omit the units that serve the NCM link')
+    ap.add_argument('--ssh-key', type=Path, metavar='PUBKEY',
+                    help='Enable sshd with key-only root login for this public key')
     ap.add_argument('--debug-shell', action='store_true',
                     help='Unauthenticated root telnetd bound to 10.231.0.1:23 (NCM link only)')
     ap.add_argument('--firmware', action='append', default=[], metavar='NAME=SHA256=FILE',
@@ -195,10 +199,29 @@ def main():
     if a.debug_shell:
         (units / 'opd-telnetd.service').write_text(DEBUG_SHELL_UNIT)
         WANTS['multi-user.target.wants'].append('opd-telnetd.service')
+    if a.no_ncm:
+        for name in ('opd-httpd.service', 'opd-control.service'):
+            (units / name).unlink()
+            WANTS['multi-user.target.wants'].remove(name)
+    if a.ssh_key:
+        key = a.ssh_key.read_text().strip()
+        if not key.startswith(('ssh-ed25519 ', 'ssh-rsa ', 'ecdsa-')) or '\n' in key:
+            raise ValueError('expected one OpenSSH public key')
+        ssh = a.out / 'var/roothome/.ssh'
+        ssh.mkdir(parents=True)
+        ssh.chmod(0o700)
+        (ssh / 'authorized_keys').write_text(key + '\n')
+        (ssh / 'authorized_keys').chmod(0o600)
+        conf = etc / 'ssh/sshd_config.d'
+        conf.mkdir(parents=True)
+        (conf / '10-opd-test.conf').write_text(
+            'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n')
+        WANTS['multi-user.target.wants'].append('/usr/lib/systemd/system/sshd.service')
     for wants, names in WANTS.items():
         (units / wants).mkdir()
         for name in names:
-            (units / wants / name).symlink_to(f'../{name}')
+            target = name if name.startswith('/') else f'../{name}'
+            (units / wants / Path(name).name).symlink_to(target)
     for unit in sorted(set(a.mask)):
         if '/' in unit or not unit.endswith(('.service', '.timer', '.path', '.socket')):
             raise ValueError('bad unit name: ' + unit)
@@ -215,6 +238,15 @@ def main():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         target.chmod(0o644)
+    # Armada resets autologin to Game Mode on every boot; with opd.desktop on the
+    # kernel command line start the desktop instead, using Armada's own helper
+    # so that "Return to Game Mode" keeps working within the session.
+    dropin = units / 'armada-session-default.service.d'
+    dropin.mkdir()
+    (dropin / '90-opd-desktop.conf').write_text(
+        "[Service]\nExecStart=\nExecStart=/bin/sh -c 'if grep -qw opd.desktop /proc/cmdline; "
+        "then exec /usr/libexec/armada/session-control default-desktop; "
+        "else exec /usr/libexec/armada/session-control default-gamemode; fi'\n")
     nm = etc / 'NetworkManager/conf.d'
     nm.mkdir(parents=True)
     (nm / '90-opd-ncm.conf').write_text(f'[keyfile]\nunmanaged-devices=mac:{DEVICE_MAC}\n')

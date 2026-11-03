@@ -135,6 +135,94 @@ DEBUG_SHELL = r'''
 	telnetd -b 10.231.0.1:23 -l /bin/sh && say 'netroot: debug shell on 10.231.0.1:23'
 '''
 
+USBROOT = r'''
+# Boot the Armada root image from a USB disk labelled @USB_LABEL@: the cable to
+# the PC is swapped for the disk after the boot menu. The squashfs image is
+# checked against the SHA-256 stored next to it (and built into this
+# initramfs), and the writable layer lives on the disk, so it persists.
+usbroot() {
+	say "==== usbroot: unplug the PC cable and plug the USB disk @USB_LABEL@ now (waiting @USB_WAIT@ s) ===="
+	dev=
+	i=0
+	while [ -z "$dev" ] && [ $i -lt @USB_WAIT@ ]; do
+		dev=$(findfs LABEL=@USB_LABEL@ 2>/dev/null)
+		[ -n "$dev" ] || { sleep 2; i=$((i + 2)); [ $((i % 20)) -eq 0 ] && say "usbroot: waiting for @USB_LABEL@ ($i s), role $(cat /sys/class/usb_role/*/role 2>/dev/null)"; }
+	done
+	[ -n "$dev" ] || { say 'usbroot: no USB disk found'; return; }
+	say "usbroot: found $dev, role $(cat /sys/class/usb_role/*/role 2>/dev/null), speed $(cat /sys/bus/usb/devices/*/speed 2>/dev/null | tr '\n' ' ')"
+	mkdir -p /usb /lower /sysroot
+	mount -t ext4 -o rw,noatime "$dev" /usb || { say 'usbroot: cannot mount the USB disk'; return; }
+	img=/usb/opd/root.squashfs
+	size=$(stat -c %s $img 2>/dev/null)
+	if [ "$size" != @ROOT_SIZE@ ]; then say "usbroot: image size $size, expected @ROOT_SIZE@"; umount /usb; return; fi
+	say 'usbroot: checking image SHA-256...'
+	digest=$(sha256sum $img | cut -d ' ' -f 1)
+	if [ "$digest" != @ROOT_SHA256@ ]; then say "usbroot: image digest mismatch: $digest"; umount /usb; return; fi
+	say "usbroot: image verified, $size bytes"
+	insmod /opd/overlay.ko || { say 'usbroot: overlay module failed'; umount /usb; return; }
+	mount -t squashfs -o ro,loop $img /lower || { say 'usbroot: squashfs mount failed'; umount /usb; return; }
+	mkdir -p /usb/opd/upper /usb/opd/work
+	mount -t overlay -o lowerdir=/lower,upperdir=/usb/opd/upper,workdir=/usb/opd/work overlay /sysroot || { say 'usbroot: overlay mount failed'; return; }
+	cp -af /opd/overlay/. /sysroot/ || { say 'usbroot: test overlay copy failed'; return; }
+	if grep -qw opd.nofw /proc/cmdline && [ -d /opd/overlay/usr/lib/firmware ]; then
+		(cd /opd/overlay && find usr/lib/firmware -type f) | while read -r f; do rm -f "/sysroot/$f"; done
+		say 'usbroot: opd.nofw, test firmware removed'
+	fi
+	[ -x /sysroot/usr/lib/systemd/systemd ] || { say 'usbroot: no systemd in image'; return; }
+	snapshot handoff
+	killall httpd telnetd 2>/dev/null
+	# Keep the disk reachable in the new root so shutdown remounts it read-only.
+	mkdir -p /sysroot/opd-usb && mount --move /usb /sysroot/opd-usb || say 'usbroot: could not move the disk mount'
+	say 'usbroot: switch_root to systemd'
+	mount --move /dev /sysroot/dev && mount --move /proc /sysroot/proc && mount --move /sys /sysroot/sys || { echo 'usbroot: cannot move mounts' > /dev/console; reboot -f; }
+	exec switch_root /sysroot /usr/lib/systemd/systemd
+}
+usbroot
+'''
+
+DISPLAY_PROBE = r'''
+# Unattended display bring-up probe for repeated boots: after @PROBE_AT@ s of
+# uptime, record whether the panel came up, serve it on the NCM link and
+# return to Android once the host has fetched it (or after the wait).
+ncm_dev=
+display_probe() {
+	i=0
+	while [ -z "$ncm_dev" ] && [ $i -lt 40 ]; do
+		for n in /sys/class/net/*; do
+			[ "$(cat $n/address 2>/dev/null)" = @DEVICE_MAC@ ] && ncm_dev=$(basename $n)
+		done
+		[ -n "$ncm_dev" ] || sleep 1
+		i=$((i + 1))
+	done
+	if [ -n "$ncm_dev" ]; then
+		mkdir -p /run/www
+		ip link set "$ncm_dev" up && ip addr add 10.231.0.1/24 dev "$ncm_dev" && httpd -p 10.231.0.1:80 -h /run/www
+	fi
+	while [ "$(cut -d. -f1 /proc/uptime)" -lt @PROBE_AT@ ]; do sleep 1; done
+	{
+		echo "uptime=$(cut -d' ' -f1 /proc/uptime)"
+		grep dsi_isr /proc/interrupts | tr -s ' '
+		echo "panel_on=$(dmesg | grep -c 'panel on (attempt')"
+		echo "panel_attempt_failed=$(dmesg | grep -c 'panel on attempt .* failed')"
+		echo "dcs_failed=$(dmesg | grep -c 'sending dcs data')"
+		echo "pll_lock_failed=$(dmesg | grep -c 'DSI PLL(0) lock failed')"
+		echo "phy_not_ready=$(dmesg | grep -c 'phy driver is not ready')"
+		echo "vblank_timeout=$(dmesg | grep -c 'vblank timeout')"
+		echo "touch_panel_prepared=$(dmesg | grep -c 'panel_prepared')"
+		echo 'log:'
+		dmesg | grep -E 'panel on|dcs data|cmd dma|PLL\(|phy driver|panel_prepared|vblank timeout|msmdrmfb|bound ae9' | head -n 40
+	} > /run/www/.display.tmp
+	dmesg > /run/www/.dmesg.tmp && mv /run/www/.dmesg.tmp /run/www/dmesg.txt
+	mv /run/www/.display.tmp /run/www/display.txt
+	say "display probe: $(grep -E '^(panel_on|panel_attempt_failed|dcs_failed)=' /run/www/display.txt | tr '\n' ' ')"
+	snapshot settled
+	# The host acknowledges by connecting to 5009; return to Android either way.
+	[ -n "$ncm_dev" ] && timeout 90 nc -l -p 5009 < /dev/null > /dev/null
+	touch /run/ncm-done
+}
+display_probe &
+'''
+
 USB_GADGET = r'''
 # A RAM-only USB gadget: an output-only ACM kernel log and/or the NCM test link.
 usb_gadget() {
@@ -328,6 +416,10 @@ def main():
                     help='Random data the tablet generates for the host to download')
     ap.add_argument('--netroot', metavar='SQUASHFS',
                     help='Boot this root image received over NCM (needs --overlay-module, --netroot-tree)')
+    ap.add_argument('--usbroot', metavar='SQUASHFS',
+                    help='Boot this root image from the USB disk --usb-label (writable layer on the disk)')
+    ap.add_argument('--usb-label', default='OPDARMADA')
+    ap.add_argument('--usb-wait', type=int, default=300, help='seconds to wait for the USB disk')
     ap.add_argument('--overlay-module', type=Path, help='overlay.ko from the same kernel build')
     ap.add_argument('--netroot-tree', type=Path, help='Test files copied over the root (netroot_overlay.py)')
     ap.add_argument('--upper-mib', type=int, default=3072, help='tmpfs writable layer size')
@@ -335,6 +427,8 @@ def main():
                     help='With --netroot: unauthenticated telnetd on 10.231.0.1:23 until switch_root')
     ap.add_argument('--netroot-timeout', type=int, default=1200,
                     help='Reset back to Android unless the image is verified within this time')
+    ap.add_argument('--display-probe', type=int, metavar='SECONDS',
+                    help='Record panel bring-up at this uptime, serve it over NCM, then reboot')
     ap.add_argument('--wait', type=int, default=120,
                     help='Seconds before the PSCI reset back to Android')
     ap.add_argument('--firmware', action='append', default=[], metavar='NAME=SHA256=FILE',
@@ -369,24 +463,30 @@ def main():
         raise ValueError('--wait must be at least 30 s and --ncm-tx-mib 1..4096')
     if a.netroot and (a.usb_ncm or not a.overlay_module or not a.netroot_tree):
         raise ValueError('--netroot replaces --usb-ncm and needs --overlay-module and --netroot-tree')
+    if a.usbroot and (a.netroot or a.usb_ncm or not a.overlay_module or not a.netroot_tree):
+        raise ValueError('--usbroot excludes --netroot/--usb-ncm and needs --overlay-module and --netroot-tree')
     root_size = root_sha256 = None
-    if a.netroot:
+    root_image = a.netroot or a.usbroot
+    if root_image:
         digest = hashlib.sha256()
-        with open(a.netroot, 'rb') as image:
+        with open(root_image, 'rb') as image:
             while block := image.read(1 << 24):
                 digest.update(block)
-        root_size, root_sha256 = Path(a.netroot).stat().st_size, digest.hexdigest()
+        root_size, root_sha256 = Path(root_image).stat().st_size, digest.hexdigest()
         for name, mode, data in tree_entries(a.netroot_tree, 'opd/overlay'):
             blob += entry(name, mode, data, ino=ino); ino += 1
         blob += entry('opd/overlay.ko', 0o100644, a.overlay_module.read_bytes(), ino=ino); ino += 1
     functions = ([('ACM log', ACM_SETUP)] if a.usb_log else []) + \
-                ([('NCM test', NCM_SETUP)] if a.usb_ncm or a.netroot else [])
+                ([('NCM test', NCM_SETUP)] if a.usb_ncm or a.netroot or a.display_probe else [])
     gadget = ''
     if functions:
         gadget = USB_GADGET.replace('@FUNCTIONS@', ' + '.join(name for name, _ in functions)) \
                            .replace('@FUNCTION_SETUP@', ''.join(setup for _, setup in functions))
     init = INIT.replace('# USB_LOG_HOOK', gadget) \
-               .replace('# NCM_TEST_HOOK', NETROOT if a.netroot else NCM_TEST if a.usb_ncm else '') \
+               .replace('# NCM_TEST_HOOK', NETROOT if a.netroot else USBROOT if a.usbroot else NCM_TEST if a.usb_ncm
+                        else DISPLAY_PROBE if a.display_probe else '') \
+               .replace('@PROBE_AT@', str(a.display_probe or 0)) \
+               .replace('@USB_LABEL@', a.usb_label).replace('@USB_WAIT@', str(a.usb_wait)) \
                .replace('\t# DEBUG_SHELL_HOOK\n', DEBUG_SHELL.lstrip('\n') if a.debug_shell else '') \
                .replace('@WAIT@', str(a.wait)) \
                .replace('@TX_MIB@', str(a.ncm_tx_mib)) \
