@@ -14,7 +14,7 @@
 #define BLK 4096U
 #define DATA 0x2000U
 
-struct disk { uint8_t lun; uint32_t block; uint64_t last; uint8_t *primary, *backup; };
+struct disk { uint8_t lun; uint32_t block; uint64_t last; uint8_t *primary, *backup, *full; };
 struct mock {
 	uint32_t host[1024], smmu[OPD_SMMU_SIZE / 4];
 	unsigned char *dma;
@@ -43,7 +43,7 @@ static void header(uint8_t *h, uint64_t self, uint64_t alt, uint64_t entries, ui
 }
 static void make_disk(struct disk *d, uint8_t lun, uint32_t block, uint64_t last)
 {
-	*d = (struct disk){lun, block, last, calloc(6, BLK), calloc(5, BLK)};
+	*d = (struct disk){lun, block, last, calloc(6, BLK), calloc(5, BLK), NULL};
 	assert(d->primary && d->backup);
 	d->primary[510] = 0x55; d->primary[511] = 0xaa;
 	uint8_t *e = d->primary + 2 * BLK;
@@ -58,6 +58,13 @@ static void make_disk(struct disk *d, uint8_t lun, uint32_t block, uint64_t last
 	header(d->primary + BLK, 1, last, 2, crc, last);
 	memcpy(d->backup, e, 4 * BLK);
 	header(d->backup + 4 * BLK, last, 1, last - 4, crc, last);
+	if (block == BLK && last < 4096) {
+		/* Small disks are fully backed: a pattern plus both GPT copies. */
+		d->full = malloc((last + 1) * BLK); assert(d->full);
+		for (uint64_t i = 0; i < (last + 1) * BLK; ++i) d->full[i] = (uint8_t)(i * 7 + i / BLK);
+		memcpy(d->full, d->primary, 6 * BLK);
+		memcpy(d->full + (last - 4) * BLK, d->backup, 5 * BLK);
+	}
 }
 
 static struct disk *find(struct mock *s, uint8_t lun)
@@ -170,9 +177,11 @@ static void execute(struct mock *s)
 		assert(d->block == BLK && xfer == blocks * BLK);
 		for (uint32_t b = 0; b < blocks; ++b) {
 			uint8_t *src = NULL;
+			/* GPT blocks always come from primary/backup so tests can corrupt them. */
 			if (lba + b < 6) src = d->primary + (lba + b) * BLK;
 			else if (lba + b >= d->last - 4 && lba + b <= d->last) src = d->backup + (lba + b - (d->last - 4)) * BLK;
-			assert(src); /* only GPT blocks are ever requested */
+			if (!src && d->full) { assert(lba + b <= d->last); src = d->full + (lba + b) * BLK; }
+			assert(src); /* sparse disks: only GPT blocks are ever requested */
 			memcpy(data + b * BLK, src, BLK);
 		}
 		if (s->mode == 4 && s->commands == s->fail_at) residual = xfer + 1;
@@ -409,7 +418,44 @@ int main(void)
 	init(s, dma); s->smmu[0x80000/4] ^= 1;
 	assert(opd2413_ufs_read_gpt(&io, dma, &r) == 1 && !s->writes);
 
-	for (unsigned i = 0; i < 3; ++i) { free(s->disk[i].primary); free(s->disk[i].backup); }
+	/* Session API as used by the U-Boot block device. */
+	struct opd_ufs_session session;
+	uint8_t luns[OPD_READ_MAX_LUNS]; unsigned nluns = 0;
+	uint8_t *got = malloc(40 * BLK); assert(got);
+	init(s, dma); s->asleep = 1; s->power_mode = 0x33; s->ssu_allowed = 1;
+	assert(!opd2413_ufs_open(&session, &io, dma, OPD_UFS_WAKE, &r) && session.open);
+	assert(!opd2413_ufs_luns(&session, luns, &nluns) && nluns == 3 && luns[0] == 0);
+	struct opd_ufs_read_lun lun0 = {.lun = 0};
+	assert(!opd2413_ufs_capacity(&session, &lun0) && lun0.capacity_ok && lun0.last_lba == 1000);
+	assert(!opd2413_ufs_read(&session, 0, 0, 40, got));           /* 14 + 14 + 12 blocks */
+	assert(!memcmp(got, s->disk[0].full, 40 * BLK));
+	assert(!opd2413_ufs_read(&session, 0, 977, 15, got));         /* odd start, chunk edge */
+	assert(!memcmp(got, s->disk[0].full + 977 * BLK, 15 * BLK));
+	assert(!opd2413_ufs_read(&session, 0, 1000, 1, got));         /* last block */
+	assert(opd2413_ufs_read(&session, 0, 0xffffffffULL, 2, got) == 1); /* past READ(10) */
+	assert(opd2413_ufs_read(&session, 0x81, 0, 1, got) == 1);     /* well-known LUN */
+	assert(!opd2413_ufs_close(&session));
+	restored(s); assert(s->asleep && s->power_mode == 0x33 && s->ssus == 2);
+	assert(opd2413_ufs_read(&session, 0, 0, 1, got) == 1);        /* closed */
+	assert(!opd2413_ufs_close(&session));                         /* idempotent */
+	/* The caller's io may die after open() (the observer's is on the board-init
+	 * stack): later reads and close must use the session's own copy. */
+	init(s, dma); s->asleep = 1; s->power_mode = 0x33; s->ssu_allowed = 1;
+	struct opd_ufs_io transient = io;
+	assert(!opd2413_ufs_open(&session, &transient, dma, OPD_UFS_WAKE, &r));
+	memset(&transient, 0, sizeof(transient));
+	assert(!opd2413_ufs_read(&session, 0, 0, 3, got) && !memcmp(got, s->disk[0].full, 3 * BLK));
+	assert(!opd2413_ufs_close(&session));
+	restored(s); assert(s->asleep && s->power_mode == 0x33);
+	/* A transport fault during a read breaks the session; close refuses. */
+	init(s, dma); s->asleep = 1; s->power_mode = 0x33; s->ssu_allowed = 1;
+	assert(!opd2413_ufs_open(&session, &io, dma, OPD_UFS_WAKE, &r));
+	s->mode = 2; s->fail_at = s->commands + 2;                     /* second READ(10) */
+	assert(opd2413_ufs_read(&session, 0, 0, 20, got) == -1 && session.broken);
+	assert(opd2413_ufs_read(&session, 0, 0, 1, got) == 1);
+	assert(opd2413_ufs_close(&session) == -1 && !s->host[0x60/4]);
+	free(got);
+	for (unsigned i = 0; i < 3; ++i) { free(s->disk[i].primary); free(s->disk[i].backup); free(s->disk[i].full); }
 	free(buffer); free(s);
 	puts("PASS: read-only CDB whitelist, CRC-32, REPORT LUNS, capacity 10/16, GPT primary/backup, UA retry, faults, restoration");
 	return 0;

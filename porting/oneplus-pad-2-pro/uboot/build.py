@@ -23,9 +23,16 @@ def main():
     ap.add_argument('--ufs-nop', action='store_true', help='Send one NOP on the pre-initialized link and restore the original queue; no storage commands')
     ap.add_argument('--ufs-link-check', action='store_true', help='DME_GET link state only, without DMA')
     ap.add_argument('--halt-on-failure', action='store_true', help='Debug: if the Android return is refused, stay on screen instead of the firmware reset that loses the RAM log')
+    ap.add_argument('--ufs-blk', action='store_true', help='Read-only opdufs block devices with FAT/ext4 read tests (implies --ufs-wake); no writes, no EFI')
+    ap.add_argument('--ufs-trace', action='store_true', help='Debug with --ufs-blk: stack-frame check around doorbells after board init; a main_loop re-entry halts with no further UFS command')
+    ap.add_argument('--ufs-blk-ramdisk', action='store_true', help='QEMU test only: opdufs served from a RAM extent table instead of UFS (implies --ufs-blk); never boot it on the device')
     ap.add_argument('--ufs-wake', action='store_true', help='With --ufs-read: START STOP UNIT to Active from Sleep/PowerDown, then restore and verify the original power mode (implies --ufs-read)')
     ap.add_argument('--ufs-read', action='store_true', help='Read-only LUN/capacity/GPT survey on the pre-initialized link; restores the original queue')
     a = ap.parse_args()
+    a.ufs_blk |= a.ufs_blk_ramdisk
+    if a.ufs_trace and not a.ufs_blk:
+        ap.error('--ufs-trace applies only to --ufs-blk')
+    a.ufs_wake |= a.ufs_blk
     a.ufs_read |= a.ufs_wake
     if a.ufs_nop + a.ufs_link_check + a.ufs_read > 1:
         ap.error('Select only one of --ufs-nop, --ufs-link-check and --ufs-read')
@@ -53,11 +60,68 @@ def main():
             run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_READ'], log)
         if a.ufs_wake:
             run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_WAKE'], log)
+        if a.ufs_blk:
+            if a.ufs_blk_ramdisk:
+                run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_BLK_RAMDISK'], log)
+            if a.ufs_trace:
+                run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_TRACE'], log)
+            for symbol in ['BLK', 'PARTITIONS', 'EFI_PARTITION', 'CMD_PART', 'FS_FAT', 'CMD_FAT',
+                           'FS_EXT4', 'CMD_EXT4', 'CMD_FS_GENERIC', 'CMD_TIME', 'CMD_HASH', 'HUSH_PARSER', 'OPD2413_UFS_BLK']:
+                run([src/'scripts/config', '--file', out/'build/.config', '--enable', symbol], log)
+            # EFI_LOADER defaults on with BLK; this stage proves block/FS reads only.
+            for symbol in ['CMD_CRC32', 'EFI_LOADER', 'FAT_WRITE', 'EXT4_WRITE', 'CMD_EXT4_WRITE', 'CMD_GPT', 'CMD_MBR', 'DOS_PARTITION',
+                           'ISO_PARTITION', 'AMIGA_PARTITION', 'MAC_PARTITION']:
+                run([src/'scripts/config', '--file', out/'build/.config', '--disable', symbol], log)
         if a.ufs_nop or a.ufs_link_check or a.ufs_read:
             # Keep the probe result visible during the countdown instead of
             # scrolling it away with the long bdinfo memory-bank listing.
             env = out/'probe.env'
             text = (overlay/'observer.env').read_text().replace('version; bdinfo;', 'version;')
+            if a.ufs_blk:
+                # Read-only exercise of block, partition, FAT and ext4 paths.
+                # 0xc0000000 lies in usable RAM clear of the ABL kernel,
+                # ramdisk, FDT, the U-Boot slot/DMA window and relocation.
+                load = 'c0000000'
+                # Hush is enabled for $? and test (sandbox-checked with these steps).
+                # Long listings go only to the RAM console ("run q"): scrolling
+                # a 3392x2400 vidconsole is slow and a photo of it is
+                # unreadable. The screen shows one marker per step, so a stall
+                # or a print loop is pinned to its step even if the log is lost.
+                # U-Boot partition numbers are hex: modem_b = 42 = 0x2a,
+                # dsp_b = 45 = 0x2d.
+                tests = []
+                def step(name, cmd, quiet):
+                    tests.extend([f'echo OPD2413_STEP {name}', *(['run q'] if quiet else []),
+                                  f'time {cmd}', 'setenv r $?', *(['run v'] if quiet else []),
+                                  f'echo OPD2413_STEP {name} rc=${{r}}'])
+                # A dangling io pointer once made every command-line UFS
+                # command restart main_loop silently, re-running bootcmd until
+                # hush ran out of memory. Any re-entry now returns to Android
+                # (UFS restored first, log kept) or halts.
+                # With --ufs-trace even the restore would issue UFS commands,
+                # so a re-entry halts at once with the diagnosis on screen.
+                reentry = (['echo OPD2413_HALTED no further UFS command; echo Hold Power and Volume Up to restart'] if a.ufs_trace else
+                           ['opd_android', 'echo OPD2413_HALTED Android return refused after re-entry'])
+                tests.extend(['if test -n "${opd_ran}"; then echo OPD2413_REENTERED main_loop restarted bootcmd',
+                              *reentry, 'while test 1 = 1; do sleep 3600; done', 'fi', 'setenv opd_ran 1'])
+                step('fatinfo', 'fatinfo opdufs 4:2a', False)
+                for path in ['/image/adsp.b00', '/image/adsp.b09', '/image/adsp.b38']:
+                    tests.append(f'echo OPD2413_FILE fat {path}')
+                    step('load', f'load opdufs 4:2a {load} {path}', False)
+                    tests.append(f'hash crc32 {load} ${{filesize}}')
+                step('ext4ls', 'ext4ls opdufs 4:2d /adsp', True)
+                tests.append('echo OPD2413_FILE ext4 /adsp/AudioSphereModule.so.1')
+                step('load', f'load opdufs 4:2d {load} /adsp/AudioSphereModule.so.1', False)
+                tests.append(f'hash crc32 {load} ${{filesize}}')
+                tests.append('echo OPD2413_BLK_TESTS_END')
+                if a.ufs_trace:
+                    # Regression for the session-io fix: the first block read
+                    # from the command line (partition 0x42) used to restart
+                    # main_loop. It must now fail cleanly with rc=1.
+                    step('repro', 'fatinfo opdufs 4:42', False)
+                if text.count('version; echo OPD2413_OBSERVER_END;') != 1:raise ValueError('observer.env bootcmd changed')
+                text = text.replace('version; echo OPD2413_OBSERVER_END;', 'version; ' + '; '.join(tests) + '; echo OPD2413_OBSERVER_END;')
+                text += 'q=setenv stdout serial; setenv stderr serial\nv=setenv stdout serial,vidconsole; setenv stderr serial,vidconsole\n'
             if a.halt_on_failure:
                 if text.count('opd_android; reset') != 1:raise ValueError('observer.env bootcmd changed')
                 text = text.replace('opd_android; reset', 'opd_android; echo OPD2413_HALTED firmware reset withheld for log reading; echo Hold Power and Volume Up to restart')
@@ -73,7 +137,10 @@ def main():
                                 ('OPD2413_UFS_NOP', a.ufs_nop),
                                 ('OPD2413_UFS_LINK_CHECK', a.ufs_link_check),
                                 ('OPD2413_UFS_READ', a.ufs_read),
-                                ('OPD2413_UFS_WAKE', a.ufs_wake)]:
+                                ('OPD2413_UFS_WAKE', a.ufs_wake),
+                                ('OPD2413_UFS_BLK', a.ufs_blk),
+                                ('OPD2413_UFS_BLK_RAMDISK', a.ufs_blk_ramdisk),
+                                ('OPD2413_UFS_TRACE', a.ufs_trace)]:
             if (f'CONFIG_{symbol}=y' in config) != enabled:
                 raise ValueError('Snapshot configuration mismatch: ' + symbol)
         # This observer cannot initialize or write storage or persistent env.
@@ -81,6 +148,13 @@ def main():
                        'CMD_SAVEENV', 'EFI_LOADER']:
             if f'CONFIG_{symbol}=y' in config:
                 raise ValueError('Unexpected observer capability: ' + symbol)
+        if a.ufs_blk:
+            for symbol in ['FAT_WRITE', 'EXT4_WRITE', 'CMD_EXT4_WRITE', 'CMD_GPT', 'CMD_MBR', 'CMD_WRITE', 'CMD_MEMORY']:
+                if f'CONFIG_{symbol}=y' in config:
+                    raise ValueError('Read-only block build has a write capability: ' + symbol)
+            for symbol in ['BLK', 'PARTITIONS', 'EFI_PARTITION', 'FS_FAT', 'FS_EXT4', 'CMD_TIME', 'CMD_HASH', 'HUSH_PARSER', 'HUSH_OLD_PARSER']:
+                if f'CONFIG_{symbol}=y' not in config:
+                    raise ValueError('Read-only block build is missing ' + symbol)
         if 'CONFIG_ENV_IS_NOWHERE=y' not in config:
             raise ValueError('Observer environment must stay in RAM')
         shutil.copyfile(overlay/'layout.h', out/'opd2413_layout.h')
@@ -89,6 +163,7 @@ def main():
         shutil.copyfile(overlay/'ufs_nop.h', out/'opd2413_ufs_nop.h')
         shutil.copyfile(overlay/'ufs_link.h', out/'opd2413_ufs_link.h')
         shutil.copyfile(overlay/'ufs_read.h', out/'opd2413_ufs_read.h')
+        shutil.copyfile(overlay/'ufs_blk.h', out/'opd2413_ufs_blk.h')
         lib = src/'scripts/dtc/libfdt'
         sources = ['fdt.c', 'fdt_ro.c', 'fdt_check.c', 'fdt_sw.c', 'fdt_rw.c',
                    'fdt_wip.c', 'fdt_empty_tree.c', 'fdt_addresses.c']

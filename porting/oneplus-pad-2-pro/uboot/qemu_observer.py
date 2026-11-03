@@ -78,7 +78,8 @@ mark:
     b 1b
 """
 
-def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=False, ufs_nop=False, ufs_link=False, ufs_read=False):
+def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=False, ufs_nop=False, ufs_link=False, ufs_read=False,
+         loaders=(), blk_ramdisk=False):
     out.mkdir(parents=True, exist_ok=True)
     (out/'entry.S').write_text(ENTRY + (DROP_EL1 if el==1 else '    ldr x4, =0xb9000000\n    br x4\n'))
     subprocess.run(['aarch64-linux-gnu-gcc','-nostdlib','-static','-Wl,--build-id=none',
@@ -98,6 +99,7 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
     for file,addr,extra in [(binary,0xb9000000,''),(fdt,0xb6947000,''),(out/'entry.bin',0x40200000,',cpu-num=0')]:
         command+=['-device',f'loader,file={file},addr={addr:#x}{extra}']
     if handoff:command+=['-device',f'loader,file={out}/sentinel.bin,addr=0xa8000000']
+    for file,addr in loaders:command+=['-device',f'loader,file={file},addr={addr:#x}']
     if ufs_snapshot:
         # QEMU virt ROM backs these low physical addresses. Seed register values,
         # not an emulated UFS device: this checks access/gating and MMU handoff.
@@ -121,7 +123,7 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
     with (out/'stderr.log').open('wb') as log:
         process=subprocess.Popen(command,stdout=log,stderr=log)
         try:
-            deadline=time.monotonic()+15
+            deadline=time.monotonic()+(60 if blk_ramdisk else 15)
             client=socket.socket(socket.AF_UNIX);client.settimeout(3)
             while True:
                 if process.poll() is not None:raise RuntimeError((out/'stderr.log').read_text())
@@ -171,7 +173,9 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
                 if ufs_link:
                     assert b'UFS_LINK skipped:' in text
                     assert b'UFS_LINK_FAIL' not in text
-                if ufs_read:
+                if blk_ramdisk:
+                    assert b'OPD2413_UFS_BLK ramdisk' in text and b'OPD2413_BLK_TESTS_END' in text
+                elif ufs_read:
                     assert b'UFS_READ skipped:' in text
                     assert b'UFS_READ_PASS' not in text
                     assert b'UFS_READ_FAIL' not in text
@@ -190,7 +194,11 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
                 qmp('quit')
                 print(f'EL{el}: PASS (CRC, high memory, framebuffer, END' + (', Linux entry contract)' if handoff else ')'))
                 return
-            raise TimeoutError('Observer END not reached')
+            try:
+                text,_=decode((out/'ramconsole.bin').read_bytes(),raw=True)
+                (out/'console-timeout.log').write_bytes(text)
+            except (ValueError,FileNotFoundError):pass
+            raise TimeoutError(f'Observer END not reached; partial log in {out}/console-timeout.log')
         finally:
             if process.poll() is None:process.terminate()
             process.wait(timeout=5)
@@ -207,10 +215,14 @@ def main():
     ap.add_argument('--ufs-nop', action='store_true', help='Check NOP preflight refuses the fake/absent hardware (requires --smmu-snapshot)')
     ap.add_argument('--ufs-link-check', action='store_true', help='Check link-state preflight refuses the fake/absent hardware')
     ap.add_argument('--ufs-read', action='store_true', help='Check the read-only survey preflight refuses the fake/absent hardware (requires --smmu-snapshot)')
+    ap.add_argument('--loader', action='append', default=[], metavar='FILE@ADDR', help='Extra guest-physical file load')
+    ap.add_argument('--blk-ramdisk', action='store_true', help='Expect the RAM-backed opdufs test build (--ufs-blk-ramdisk) to finish its block tests')
     a=ap.parse_args()
+    loaders=[(Path(f).resolve(),int(addr,0)) for f,addr in (s.rsplit('@',1) for s in a.loader)]
     if a.smmu_snapshot and not a.ufs_snapshot:ap.error('--smmu-snapshot requires --ufs-snapshot')
     if a.ufs_nop and not a.smmu_snapshot:ap.error('--ufs-nop requires --smmu-snapshot')
     if a.ufs_read and not a.smmu_snapshot:ap.error('--ufs-read requires --smmu-snapshot')
-    for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff,a.ufs_snapshot,a.smmu_snapshot,a.ufs_nop,a.ufs_link_check,a.ufs_read)
+    for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff,a.ufs_snapshot,a.smmu_snapshot,a.ufs_nop,a.ufs_link_check,a.ufs_read,
+                         loaders,a.blk_ramdisk)
 
 if __name__=='__main__':main()

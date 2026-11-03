@@ -43,6 +43,8 @@ def main():
                            ('ufs_link.h', mach/'opd2413_ufs_link.h'),
                            ('ufs_read.c', mach/'opd2413_ufs_read.c'),
                            ('ufs_read.h', mach/'opd2413_ufs_read.h'),
+                           ('ufs_blk.c', mach/'opd2413_ufs_blk.c'),
+                           ('ufs_blk.h', mach/'opd2413_ufs_blk.h'),
                            ('serial_ramconsole.c', root/'drivers/serial/serial_opd2413_ramconsole.c'),
                            ('ramconsole_format.h', root/'drivers/serial/opd2413_ramconsole_format.h'),
                            ('observer_defconfig', root/'configs/opd2413_observer_defconfig'),
@@ -78,6 +80,34 @@ def main():
                   '\tdepends on OPD2413_SMMU_SNAPSHOT && !OPD2413_UFS_NOP && !OPD2413_UFS_LINK_CHECK\n\tdefault n\n\n')
     insert_before(mach/'Makefile', 'obj-y += dram.o',
                   'obj-$(CONFIG_OPD2413_UFS_READ) += opd2413_ufs_read.o opd2413_ufs_nop.o opd2413_ufs_link.o\n')
+    blk_old = ('config OPD2413_UFS_BLK\n\tbool "Read-only block devices (opdufs) on the woken ABL UFS link"\n'
+               '\tdepends on OPD2413_UFS_WAKE && BLK\n\tdefault n\n\n')
+    blk_new = ('config OPD2413_UFS_BLK\n\tbool "Read-only block devices (opdufs) on the woken ABL UFS link"\n'
+               '\tdepends on OPD2413_UFS_WAKE\n\tselect BLK\n\tdefault n\n\n')
+    if blk_old in (mach/'Kconfig').read_text():  # earlier revision of this overlay
+        replace_once(mach/'Kconfig', blk_old, blk_new)
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n', blk_new)
+    insert_before(mach/'Makefile', 'obj-y += dram.o', 'obj-$(CONFIG_OPD2413_UFS_BLK) += opd2413_ufs_blk.o\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_UFS_TRACE\n\tbool "Debug: stack-frame check around UFS doorbells issued after board init"\n'
+                  '\tdepends on OPD2413_UFS_READ\n\tdefault n\n\n')
+    # Report every main_loop entry (re-entry diagnosis); other configs of this
+    # checkout, such as sandbox, are unaffected.
+    hook_old = ('\tbootstage_mark_name(BOOTSTAGE_ID_MAIN_LOOP, "main_loop");\n'
+                '\t{ extern void opd2413_main_loop_hook(void); opd2413_main_loop_hook(); }\n')
+    hook_new = ('\tbootstage_mark_name(BOOTSTAGE_ID_MAIN_LOOP, "main_loop");\n'
+                '#ifdef CONFIG_OPD2413_OBSERVER\n'
+                '\t{ extern void opd2413_main_loop_hook(void); opd2413_main_loop_hook(); }\n'
+                '#endif\n')
+    if hook_old in (root/'common/main.c').read_text():  # earlier revision of this overlay
+        replace_once(root/'common/main.c', hook_old, hook_new)
+    replace_once(root/'common/main.c', '\tbootstage_mark_name(BOOTSTAGE_ID_MAIN_LOOP, "main_loop");\n', hook_new)
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_UFS_BLK_RAMDISK\n\tbool "QEMU test only: serve opdufs from a RAM extent table, no UFS"\n'
+                  '\tdepends on OPD2413_UFS_BLK\n\tdefault n\n\n')
+    insert_before(root/'include/dm/uclass-id.h', '\tUCLASS_COUNT,\n', '\tUCLASS_OPD2413_UFS,\t/* OPD2413 read-only UFS observer */\n')
+    replace_once(root/'drivers/block/blk-uclass.c', '\t{ UCLASS_RKMTD, "rkmtd" },\n',
+                 '\t{ UCLASS_RKMTD, "rkmtd" },\n\t{ UCLASS_OPD2413_UFS, "opdufs" },\n')
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
                   'config OPD2413_UFS_WAKE\n\tbool "Wake the UFS device for the survey and restore its power mode"\n'
                   '\tdepends on OPD2413_UFS_READ\n\tdefault n\n\n')

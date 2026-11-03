@@ -23,6 +23,9 @@
 #include "opd2413_ufs_nop.h"
 #include "opd2413_ufs_link.h"
 #include "opd2413_ufs_read.h"
+#ifdef CONFIG_OPD2413_UFS_BLK
+#include "opd2413_ufs_blk.h"
+#endif
 
 DECLARE_GLOBAL_DATA_PTR;
 /* board_fdt_blob_setup runs before BSS is available. */
@@ -172,6 +175,66 @@ static void probe_sync(void *ctx) { mb(); }
 static void probe_delay(unsigned us, void *ctx) { udelay(us); }
 #endif
 
+static u64 read_cntpct(void)
+{
+	u64 v;
+	asm volatile("isb; mrs %0, cntpct_el0" : "=r"(v));
+	return v;
+}
+static u64 read_sp(void) { u64 v; asm volatile("mov %0, sp" : "=r"(v)); return v; }
+static u64 read_daif(void) { u64 v; asm volatile("mrs %0, daif" : "=r"(v)); return v; }
+
+/* Called first thing in every main_loop() entry (common/main.c patch). */
+void opd2413_main_loop_hook(void)
+{
+	static unsigned entries;
+	const u64 *frame = __builtin_frame_address(0);
+	const u64 *caller = (const u64 *)frame[0]; /* main_loop's frame record */
+	printf("OPD2413_MAIN_LOOP entry=%u sp=%llx fp=%llx lr=%llx daif=%llx cntpct=%llx\n", ++entries,
+	       read_sp(), (unsigned long long)(uintptr_t)caller,
+	       caller ? (unsigned long long)caller[1] - gd->reloc_off : 0ULL, read_daif(), read_cntpct());
+}
+
+#ifdef CONFIG_OPD2413_UFS_TRACE
+static int trace_budget; /* commands left to trace; set after board init */
+/*
+ * Frame-record chain and stack contents above the caller of submit()/query()
+ * must not change while the doorbell is outstanding: neither the CPU nor the
+ * UFS DMA should touch them. Compare a CRC of [caller frame, initial SP).
+ */
+static u32 stack_crc(const u64 *frame, unsigned *depth, u64 *base)
+{
+	const u64 *fp = (const u64 *)frame[0]; /* submit()/query() frame */
+	fp = fp ? (const u64 *)fp[0] : NULL;    /* its caller */
+	u64 top = gd->start_addr_sp;
+	unsigned n = 0;
+	*base = (u64)(uintptr_t)fp;
+	if (!fp || (u64)(uintptr_t)fp >= top) { *depth = 0; return 0; }
+	for (const u64 *f = fp; f && (u64)(uintptr_t)f < top && !((uintptr_t)f & 7) && n < 64; f = (const u64 *)f[0]) ++n;
+	*depth = n;
+	return crc32(0, (const void *)fp, top - (u64)(uintptr_t)fp);
+}
+
+void opd2413_ufs_trace(int phase, uint8_t op, uint8_t lun)
+{
+	static u32 before_crc;
+	static unsigned before_depth;
+	unsigned depth;
+	u64 base;
+	if (trace_budget <= 0) return;
+	u32 crc = stack_crc(__builtin_frame_address(0), &depth, &base);
+	if (!phase) {
+		before_crc = crc; before_depth = depth;
+		printf("OPD2413_TRACE ring %02x lun %02x sp=%llx base=%llx top=%llx frames=%u\n", op, lun,
+		       read_sp(), base, (unsigned long long)gd->start_addr_sp, depth);
+		return;
+	}
+	printf("OPD2413_TRACE done %02x frames=%u %s cntpct=%llx\n", op, depth,
+	       crc == before_crc && depth == before_depth ? "stack ok" : "STACK CHANGED", read_cntpct());
+	if (--trace_budget == 0) printf("OPD2413_TRACE budget used; tracing off\n");
+}
+#endif
+
 int opd2413_observer_late(void)
 {
 	struct udevice *display;
@@ -181,8 +244,9 @@ int opd2413_observer_late(void)
 		iomux_doenv(stdout, "serial,vidconsole");
 		iomux_doenv(stderr, "serial,vidconsole");
 	}
-	printf("OPD2413_OBSERVER_READY EL%u original_fdt=%llx\n", current_el(),
-	       (unsigned long long)get_prev_bl_fdt_addr());
+	/* The counter runs from power-on: a re-entered observer prints a larger value. */
+	printf("OPD2413_OBSERVER_READY EL%u original_fdt=%llx cntpct=%llx\n", current_el(),
+	       (unsigned long long)get_prev_bl_fdt_addr(), read_cntpct());
 	printf("No storage drivers or environment writes enabled.\n");
 #ifdef CONFIG_OPD2413_UFS_SNAPSHOT
 	opd2413_ufs_snapshot(snapshot_read32, NULL);
@@ -196,12 +260,25 @@ int opd2413_observer_late(void)
 		android_handoff_safe = opd2413_ufs_nop(&io, (volatile void *)OPD_DMA_BASE) >= 0;
 	} else printf("UFS_NOP skipped: unexpected EL or stream ID\n");
 #endif
-#ifdef CONFIG_OPD2413_UFS_READ
+#ifdef CONFIG_OPD2413_UFS_BLK_RAMDISK
+	android_handoff_safe = opd2413_ufs_blk_start_ramdisk() == 0;
+#elif defined(CONFIG_OPD2413_UFS_BLK)
+	if (current_el() == 1 && original_ufs_sid == 0x60) {
+		/* Static: the block devices are read long after this frame is gone. */
+		static const struct opd_ufs_io io = {snapshot_read32, probe_write32, probe_sync, probe_delay, NULL};
+		android_handoff_safe = opd2413_ufs_blk_start(&io) >= 0;
+	} else printf("UFS_READ skipped: unexpected EL or stream ID (block devices)\n");
+#elif defined(CONFIG_OPD2413_UFS_READ)
 	if (current_el() == 1 && original_ufs_sid == 0x60) {
 		const struct opd_ufs_io io = {snapshot_read32, probe_write32, probe_sync, probe_delay, NULL};
 		android_handoff_safe = opd2413_ufs_survey(&io, (volatile void *)OPD_DMA_BASE, NULL,
 			IS_ENABLED(CONFIG_OPD2413_UFS_WAKE) ? OPD_UFS_WAKE : 0) >= 0;
 	} else printf("UFS_READ skipped: unexpected EL or stream ID\n");
+#endif
+#ifdef CONFIG_OPD2413_UFS_TRACE
+	printf("OPD2413_LATE_END sp=%llx daif=%llx top=%llx reloc=%llx cntpct=%llx\n", read_sp(), read_daif(),
+	       (unsigned long long)gd->start_addr_sp, (unsigned long long)gd->relocaddr, read_cntpct());
+	trace_budget = 12;
 #endif
 #ifdef CONFIG_OPD2413_UFS_LINK_CHECK
 	if (current_el() == 1) {
@@ -219,6 +296,14 @@ static int do_opd_android(struct cmd_tbl *cmdtp, int flag, int argc, char *const
 #if defined(CONFIG_OPD2413_UFS_NOP) || defined(CONFIG_OPD2413_UFS_LINK_CHECK) || defined(CONFIG_OPD2413_UFS_READ)
 	if (!android_handoff_safe) {
 		printf("observer: controller state uncertain; firmware reset required\n");
+		return CMD_RET_FAILURE;
+	}
+#endif
+#ifdef CONFIG_OPD2413_UFS_BLK
+	/* Restore the device power mode, ABL's queue and Hibern8 first. */
+	if (android_handoff_safe && opd2413_ufs_blk_stop()) android_handoff_safe = 0;
+	if (!android_handoff_safe) {
+		printf("observer: UFS block session not restored; firmware reset required\n");
 		return CMD_RET_FAILURE;
 	}
 #endif

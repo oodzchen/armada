@@ -59,6 +59,33 @@ int opd2413_ufs_survey(const struct opd_ufs_io *io, volatile void *dma,
 /* START STOP UNIT whitelist: Device W-LUN, POWER CONDITION 1/2/3, IMMED=0. */
 int opd2413_ufs_ssu_allowed(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, uint32_t xfer);
 
+/*
+ * Session API used by the read-only U-Boot block device. open: preflight,
+ * Hibern8 exit, private queue, queries and (OPD_UFS_WAKE) wake. read: whole
+ * 4 KiB blocks through READ(10), at most 14 per command. close: restore the
+ * power mode (verified), ABL's queue and Hibern8. Any transport fault marks
+ * the session broken: later calls fail and close() returns -1, so the
+ * caller must refuse the Android return.
+ * open: 0 = open, 1 = skipped with no DMA, -1 = uncertain.
+ * read/capacity: 0 = done, 1 = the unit refused, -1 = uncertain.
+ */
+struct opd_ufs_session {
+	/* open() copies the caller's io: the observer's lives on the board-init
+	 * stack, which main_loop reuses before the block device reads. */
+	struct opd_ufs_io io_copy;
+	const struct opd_ufs_io *io; /* = &io_copy */
+	volatile uint8_t *dma;
+	struct opd_ufs_read_result *res;
+	uint32_t saved[3];
+	uint8_t condition, open, broken;
+};
+int opd2413_ufs_open(struct opd_ufs_session *s, const struct opd_ufs_io *io, volatile void *dma,
+		     unsigned flags, struct opd_ufs_read_result *res);
+int opd2413_ufs_luns(struct opd_ufs_session *s, uint8_t luns[OPD_READ_MAX_LUNS], unsigned *count);
+int opd2413_ufs_capacity(struct opd_ufs_session *s, struct opd_ufs_read_lun *l);
+int opd2413_ufs_read(struct opd_ufs_session *s, uint8_t lun, uint64_t lba, uint32_t blocks, void *buffer);
+int opd2413_ufs_close(struct opd_ufs_session *s);
+
 /* IEEE 802.3 CRC-32 as used by GPT and zlib. */
 uint32_t opd2413_crc32(uint32_t crc, const volatile void *buf, size_t len);
 /* Query whitelist: STANDARD READ of a descriptor, attribute or flag only. */
