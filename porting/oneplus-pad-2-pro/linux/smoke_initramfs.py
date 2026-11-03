@@ -128,6 +128,13 @@ say "rebooting"
 reboot -f
 '''
 
+DEBUG_SHELL = r'''
+	# Unauthenticated root shell for this RAM test, bound to the point-to-point
+	# NCM address only (opd_shell.py on the host).
+	mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null
+	telnetd -b 10.231.0.1:23 -l /bin/sh && say 'netroot: debug shell on 10.231.0.1:23'
+'''
+
 USB_GADGET = r'''
 # A RAM-only USB gadget: an output-only ACM kernel log and/or the NCM test link.
 usb_gadget() {
@@ -240,6 +247,7 @@ netroot() {
 	mkdir -p /run/www
 	ip link set "$ncm_dev" up && ip addr add 10.231.0.1/24 dev "$ncm_dev" || { say "netroot: cannot configure $ncm_dev"; return; }
 	httpd -p 10.231.0.1:80 -h /run/www || { say 'netroot: httpd failed'; return; }
+	# DEBUG_SHELL_HOOK
 	echo "expect bytes=@ROOT_SIZE@ sha256=@ROOT_SHA256@" > $R
 	# Without a verified image in time, record the state and return to Android.
 	( sleep @NETROOT_TIMEOUT@; say 'netroot: no verified image in time'; snapshot final; reboot -f ) &
@@ -273,7 +281,7 @@ netroot() {
 	echo 'switching root' >> $R
 	snapshot handoff
 	kill $watchdog
-	killall httpd 2>/dev/null
+	killall httpd telnetd 2>/dev/null
 	say 'netroot: switch_root to systemd'
 	mount --move /dev /sysroot/dev && mount --move /proc /sysroot/proc && mount --move /sys /sysroot/sys || { echo 'netroot: cannot move mounts' > /dev/console; reboot -f; }
 	exec switch_root /sysroot /usr/lib/systemd/systemd
@@ -323,6 +331,8 @@ def main():
     ap.add_argument('--overlay-module', type=Path, help='overlay.ko from the same kernel build')
     ap.add_argument('--netroot-tree', type=Path, help='Test files copied over the root (netroot_overlay.py)')
     ap.add_argument('--upper-mib', type=int, default=3072, help='tmpfs writable layer size')
+    ap.add_argument('--debug-shell', action='store_true',
+                    help='With --netroot: unauthenticated telnetd on 10.231.0.1:23 until switch_root')
     ap.add_argument('--netroot-timeout', type=int, default=1200,
                     help='Reset back to Android unless the image is verified within this time')
     ap.add_argument('--wait', type=int, default=120,
@@ -377,6 +387,7 @@ def main():
                            .replace('@FUNCTION_SETUP@', ''.join(setup for _, setup in functions))
     init = INIT.replace('# USB_LOG_HOOK', gadget) \
                .replace('# NCM_TEST_HOOK', NETROOT if a.netroot else NCM_TEST if a.usb_ncm else '') \
+               .replace('\t# DEBUG_SHELL_HOOK\n', DEBUG_SHELL.lstrip('\n') if a.debug_shell else '') \
                .replace('@WAIT@', str(a.wait)) \
                .replace('@TX_MIB@', str(a.ncm_tx_mib)) \
                .replace('@ROOT_SIZE@', str(root_size)).replace('@ROOT_SHA256@', str(root_sha256)) \

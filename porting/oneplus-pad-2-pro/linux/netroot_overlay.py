@@ -52,6 +52,14 @@ stage=$1
 	echo 'gpu:'; journalctl -k -b --no-pager -o cat | grep -Ei 'adreno|gmu|zap|a8xx|msm_dpu|gpu' | tail -n 25
 	echo "render=$(ls /dev/dri 2>/dev/null | tr '\n' ' ')"
 	echo 'mounts:'; grep -E ' / | /usr | /var | /etc ' /proc/mounts
+	if [ "$stage" != poll ]; then
+		# Heavier checks (they open the GPU) only for the recorded stages.
+		echo 'vulkan:'; timeout 30 vulkaninfo --summary 2>&1 | grep -E 'deviceName|driverID|driverName|driverInfo|apiVersion|deviceType' | head -n 12
+		echo 'egl:'; EGL_PLATFORM=surfaceless timeout 30 eglinfo -B 2>&1 | grep -Ei 'renderer|EGL driver name|version string' | head -n 8
+		echo 'gamescope:'; journalctl -b --no-pager -o cat | grep -Ei 'physical device|vulkan: |Failed to (create|initialize)' | tail -n 6
+		echo 'touch:'; timeout 20 libinput list-devices 2>&1 | grep -A9 -Ei 'novatek|nt36536|touch' | grep -E 'Device|Kernel|Capabilities|Size|Calibration' | head -n 12
+		journalctl -k -b --no-pager -o cat | grep -E 'nt36536' | tail -n 4
+	fi
 } > /run/opd-www/.status.tmp 2>&1
 # Publish complete files only: httpd may read at any time.
 mv /run/opd-www/.status.tmp /run/opd-www/status.txt
@@ -141,6 +149,17 @@ WANTS = {
 }
 
 
+DEBUG_SHELL_UNIT = '''[Unit]
+Description=OPD2413 test: root shell on the NCM link only (opd_shell.py)
+After=opd-httpd.service
+
+[Service]
+ExecStart=/etc/opd/busybox telnetd -F -b 10.231.0.1:23 -l /bin/bash
+Restart=on-failure
+RestartSec=2
+'''
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--busybox', type=Path, required=True, help='static aarch64 busybox')
@@ -148,6 +167,8 @@ def main():
     ap.add_argument('--return-after', type=int, default=600, help='seconds after boot')
     ap.add_argument('--mask', action='append', default=[], metavar='UNIT',
                     help='Unit to mask (repeatable); must exist in the image')
+    ap.add_argument('--debug-shell', action='store_true',
+                    help='Unauthenticated root telnetd bound to 10.231.0.1:23 (NCM link only)')
     ap.add_argument('--firmware', action='append', default=[], metavar='NAME=SHA256=FILE',
                     help='Private firmware for /usr/lib/firmware/NAME, hash-checked (repeatable); '
                          'the initramfs drops these when the kernel command line has opd.nofw')
@@ -167,6 +188,9 @@ def main():
     (opd / 'state.sh').chmod(0o755)
     for name, text in UNITS.items():
         (units / name).write_text(text.replace('@RETURN@', f'{a.return_after}s'))
+    if a.debug_shell:
+        (units / 'opd-telnetd.service').write_text(DEBUG_SHELL_UNIT)
+        WANTS['multi-user.target.wants'].append('opd-telnetd.service')
     for wants, names in WANTS.items():
         (units / wants).mkdir()
         for name in names:
