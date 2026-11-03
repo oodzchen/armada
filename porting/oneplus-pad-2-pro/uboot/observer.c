@@ -26,6 +26,10 @@
 #ifdef CONFIG_OPD2413_UFS_BLK
 #include "opd2413_ufs_blk.h"
 #endif
+#ifdef CONFIG_OPD2413_EFI
+#include <env.h>
+#include <lmb.h>
+#endif
 
 DECLARE_GLOBAL_DATA_PTR;
 /* board_fdt_blob_setup runs before BSS is available. */
@@ -235,6 +239,116 @@ void opd2413_ufs_trace(int phase, uint8_t op, uint8_t lun)
 }
 #endif
 
+#ifdef CONFIG_OPD2413_EFI
+/*
+ * EFI allocates through LMB. Before any EFI code runs, reserve everything the
+ * Android return depends on: ABL's kernel, FDT and initrd (one RAM bank from
+ * 0xa8000000), the U-Boot load slot with the UFS DMA window, the framebuffer
+ * and the ramoops zone. A CRC of the ABL range taken here is checked again by
+ * opd_android, so the return is refused if anything wrote into it.
+ */
+#define OPD_ABL_BASE 0xa8000000ULL
+#define OPD_SLOT_BASE 0xb9000000ULL
+#define OPD_SLOT_END 0xba000000ULL
+#define OPD_RAMOOPS_SIZE 0x240000ULL
+static u64 abl_end __section(".data");
+static u32 abl_crc __section(".data");
+
+static int chosen_u64(const void *fdt, int node, const char *name, u64 *out)
+{
+	int len;
+	const fdt32_t *p = fdt_getprop(fdt, node, name, &len);
+	if (!p || (len != 4 && len != 8)) return -1;
+	*out = len == 8 ? cell64(p) : fdt32_to_cpu(p[0]);
+	return 0;
+}
+
+/* Reserve every still-free byte of [base, end) that LMB knows as memory. */
+static int protect(u64 base, u64 end, unsigned *pieces)
+{
+	struct lmb *l = lmb_get();
+	for (unsigned m = 0; m < l->available_mem.count; ++m) {
+		const struct lmb_region *mem = (const struct lmb_region *)l->available_mem.data + m;
+		u64 cur = max(base, (u64)mem->base), stop = min(end, (u64)mem->base + mem->size);
+		while (cur < stop) {
+			const struct lmb_region *used = l->used_mem.data;
+			u64 next = stop;
+			int inside = 0;
+			for (unsigned u = 0; u < l->used_mem.count; ++u) {
+				u64 ub = used[u].base, ue = ub + used[u].size;
+				if (ub <= cur && cur < ue) { cur = ue; inside = 1; break; }
+				if (ub > cur && ub < next) next = ub;
+			}
+			if (inside) continue;
+			phys_addr_t a = cur;
+			if (lmb_alloc_mem(LMB_MEM_ALLOC_ADDR, 0, &a, next - cur, LMB_NOOVERWRITE)) {
+				printf("OPD2413_EFI_PROTECT reserve %llx-%llx failed\n", cur, next);
+				return -1;
+			}
+			++*pieces; cur = next;
+		}
+	}
+	return 0;
+}
+
+/* Allocation anywhere in [base, end) must now be impossible. */
+static int unallocatable(u64 base, u64 end)
+{
+	for (u64 a = base & ~0xfffULL; a < end; a += SZ_1M) {
+		phys_addr_t p = a;
+		if (!lmb_alloc_mem(LMB_MEM_ALLOC_ADDR, 0, &p, 0x1000, LMB_NONE)) {
+			lmb_free(p, 0x1000, LMB_NONE);
+			printf("OPD2413_EFI_PROTECT %llx still allocatable\n", a);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static void efi_protect(void)
+{
+	const void *fdt = (const void *)get_prev_bl_fdt_addr();
+	int chosen = fdt_path_offset(fdt, "/chosen");
+	u64 rd_start, rd_end, fdt_end = (u64)(uintptr_t)fdt + fdt_totalsize(fdt);
+	struct lmb *l = lmb_get();
+	unsigned pieces = 0, bank = 0;
+	if (chosen < 0 || chosen_u64(fdt, chosen, "linux,initrd-start", &rd_start) ||
+	    chosen_u64(fdt, chosen, "linux,initrd-end", &rd_end) || rd_end < rd_start) {
+		printf("OPD2413_EFI_PROTECT no initrd range in the ABL FDT; EFI disabled\n");
+		return;
+	}
+	abl_end = max(fdt_end, rd_end);
+	for (unsigned m = 0; m < l->available_mem.count; ++m) {
+		const struct lmb_region *mem = (const struct lmb_region *)l->available_mem.data + m;
+		if (mem->base <= OPD_ABL_BASE && abl_end <= mem->base + mem->size) bank = 1;
+	}
+	if ((u64)(uintptr_t)fdt < OPD_ABL_BASE || rd_start < OPD_ABL_BASE || abl_end > OPD_SLOT_BASE || !bank) {
+		printf("OPD2413_EFI_PROTECT unexpected layout fdt=%llx-%llx initrd=%llx-%llx; EFI disabled\n",
+		       (u64)(uintptr_t)fdt, fdt_end, rd_start, rd_end);
+		return;
+	}
+	/* Already-used regions are skipped by protect(); list those in the ABL
+	 * range (the handoff CRC still covers them). */
+	for (unsigned u = 0; u < l->used_mem.count; ++u) {
+		const struct lmb_region *r = (const struct lmb_region *)l->used_mem.data + u;
+		if (r->base < abl_end && r->base + r->size > OPD_ABL_BASE)
+			printf("OPD2413_EFI_PROTECT pre-used %llx-%llx flags=%x\n", (u64)r->base,
+			       (u64)(r->base + r->size), r->flags);
+	}
+	const u64 ranges[][2] = {{OPD_ABL_BASE, abl_end}, {OPD_SLOT_BASE, OPD_SLOT_END},
+				 {FB_BASE, FB_BASE + FB_SIZE}, {LOG_BASE, LOG_BASE + OPD_RAMOOPS_SIZE}};
+	for (unsigned i = 0; i < ARRAY_SIZE(ranges); ++i)
+		if (protect(ranges[i][0], ranges[i][1], &pieces) || unallocatable(ranges[i][0], ranges[i][1])) {
+			printf("OPD2413_EFI_PROTECT failed; EFI disabled\n");
+			return;
+		}
+	abl_crc = crc32(0, (const void *)OPD_ABL_BASE, abl_end - OPD_ABL_BASE);
+	printf("OPD2413_EFI_PROTECT abl=%llx-%llx initrd=%llx-%llx crc=%08x pieces=%u\n",
+	       OPD_ABL_BASE, abl_end, rd_start, rd_end, abl_crc, pieces);
+	env_set("opd_efi_safe", "1");
+}
+#endif
+
 int opd2413_observer_late(void)
 {
 	struct udevice *display;
@@ -248,6 +362,9 @@ int opd2413_observer_late(void)
 	printf("OPD2413_OBSERVER_READY EL%u original_fdt=%llx cntpct=%llx\n", current_el(),
 	       (unsigned long long)get_prev_bl_fdt_addr(), read_cntpct());
 	printf("No storage drivers or environment writes enabled.\n");
+#ifdef CONFIG_OPD2413_EFI
+	efi_protect(); /* before the block devices register EFI disks */
+#endif
 #ifdef CONFIG_OPD2413_UFS_SNAPSHOT
 	opd2413_ufs_snapshot(snapshot_read32, NULL);
 #endif
@@ -316,6 +433,12 @@ static int do_opd_android(struct cmd_tbl *cmdtp, int flag, int argc, char *const
 		printf("observer: original ABL handoff changed; refusing Android return\n");
 		return CMD_RET_FAILURE;
 	}
+#ifdef CONFIG_OPD2413_EFI
+	if (abl_end && crc32(0, (const void *)OPD_ABL_BASE, abl_end - OPD_ABL_BASE) != abl_crc) {
+		printf("observer: ABL kernel/FDT/initrd range changed; refusing Android return\n");
+		return CMD_RET_FAILURE;
+	}
+#endif
 	printf("OPD2413_ANDROID_HANDOFF fdt_crc=%08x entry=a8000004\n", original_fdt_crc);
 	cleanup_before_linux();
 	((void (*)(u64, u64, u64, u64))0xa8000004ULL)((u64)fdt, 0, 0, 0);

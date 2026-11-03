@@ -24,12 +24,13 @@ def main():
     ap.add_argument('--ufs-link-check', action='store_true', help='DME_GET link state only, without DMA')
     ap.add_argument('--halt-on-failure', action='store_true', help='Debug: if the Android return is refused, stay on screen instead of the firmware reset that loses the RAM log')
     ap.add_argument('--ufs-blk', action='store_true', help='Read-only opdufs block devices with FAT/ext4 read tests (implies --ufs-wake); no writes, no EFI')
+    ap.add_argument('--efi-hello', action='store_true', help='With the opdufs tests, enable the EFI loader (volatile variables only, ABL handoff memory reserved and CRC-checked) and run bootefi hello (implies --ufs-blk)')
     ap.add_argument('--ufs-trace', action='store_true', help='Debug with --ufs-blk: stack-frame check around doorbells after board init; a main_loop re-entry halts with no further UFS command')
     ap.add_argument('--ufs-blk-ramdisk', action='store_true', help='QEMU test only: opdufs served from a RAM extent table instead of UFS (implies --ufs-blk); never boot it on the device')
     ap.add_argument('--ufs-wake', action='store_true', help='With --ufs-read: START STOP UNIT to Active from Sleep/PowerDown, then restore and verify the original power mode (implies --ufs-read)')
     ap.add_argument('--ufs-read', action='store_true', help='Read-only LUN/capacity/GPT survey on the pre-initialized link; restores the original queue')
     a = ap.parse_args()
-    a.ufs_blk |= a.ufs_blk_ramdisk
+    a.ufs_blk |= a.ufs_blk_ramdisk or a.efi_hello
     if a.ufs_trace and not a.ufs_blk:
         ap.error('--ufs-trace applies only to --ufs-blk')
     a.ufs_wake |= a.ufs_blk
@@ -68,9 +69,22 @@ def main():
             for symbol in ['BLK', 'PARTITIONS', 'EFI_PARTITION', 'CMD_PART', 'FS_FAT', 'CMD_FAT',
                            'FS_EXT4', 'CMD_EXT4', 'CMD_FS_GENERIC', 'CMD_TIME', 'CMD_HASH', 'HUSH_PARSER', 'OPD2413_UFS_BLK']:
                 run([src/'scripts/config', '--file', out/'build/.config', '--enable', symbol], log)
-            # EFI_LOADER defaults on with BLK; this stage proves block/FS reads only.
-            for symbol in ['CMD_CRC32', 'EFI_LOADER', 'FAT_WRITE', 'EXT4_WRITE', 'CMD_EXT4_WRITE', 'CMD_GPT', 'CMD_MBR', 'DOS_PARTITION',
+            # EFI_LOADER defaults on with BLK; only --efi-hello keeps it.
+            for symbol in ['CMD_CRC32', *([] if a.efi_hello else ['EFI_LOADER']), 'FAT_WRITE', 'EXT4_WRITE', 'CMD_EXT4_WRITE', 'CMD_GPT', 'CMD_MBR', 'DOS_PARTITION',
                            'ISO_PARTITION', 'AMIGA_PARTITION', 'MAC_PARTITION']:
+                run([src/'scripts/config', '--file', out/'build/.config', '--disable', symbol], log)
+        if a.efi_hello:
+            for symbol in ['EFI_LOADER', 'CMD_BOOTEFI', 'CMD_BOOTEFI_BINARY', 'BOOTEFI_HELLO_COMPILE', 'CMD_BOOTEFI_HELLO',
+                           'CMD_EFIDEBUG', 'EFI_VARIABLE_NO_STORE', 'OPD2413_EFI']:
+                run([src/'scripts/config', '--file', out/'build/.config', '--enable', symbol], log)
+            # No persistent variables, capsules, time setting, TPM or network boot.
+            for symbol in ['EFI_VARIABLE_FILE_STORE', 'EFI_VARIABLE_SF_STORE', 'EFI_MM_COMM_TEE', 'EFI_RT_VOLATILE_STORE',
+                           'EFI_VARIABLES_PRESEED', 'EFI_HAVE_CAPSULE_SUPPORT', 'EFI_RUNTIME_UPDATE_CAPSULE',
+                           'EFI_CAPSULE_ON_DISK', 'EFI_CAPSULE_ON_DISK_EARLY', 'EFI_CAPSULE_FIRMWARE_FIT',
+                           'EFI_CAPSULE_FIRMWARE_RAW', 'EFI_CAPSULE_FIRMWARE_MANAGEMENT', 'EFI_SET_TIME',
+                           'EFI_TCG2_PROTOCOL', 'EFI_HTTP_BOOT', 'EFI_IP4_CONFIG2_PROTOCOL', 'EFI_HTTP_PROTOCOL',
+                           'EFI_SECURE_BOOT', 'CMD_NVEDIT_EFI', 'CMD_EFICONFIG',
+                           'CMD_BOOTEFI_SELFTEST', 'EFI_BOOTMGR']:
                 run([src/'scripts/config', '--file', out/'build/.config', '--disable', symbol], log)
         if a.ufs_nop or a.ufs_link_check or a.ufs_read:
             # Keep the probe result visible during the countdown instead of
@@ -90,8 +104,8 @@ def main():
                 # U-Boot partition numbers are hex: modem_b = 42 = 0x2a,
                 # dsp_b = 45 = 0x2d.
                 tests = []
-                def step(name, cmd, quiet):
-                    tests.extend([f'echo OPD2413_STEP {name}', *(['run q'] if quiet else []),
+                def step(name, cmd, quiet, out=None):
+                    (tests if out is None else out).extend([f'echo OPD2413_STEP {name}', *(['run q'] if quiet else []),
                                   f'time {cmd}', 'setenv r $?', *(['run v'] if quiet else []),
                                   f'echo OPD2413_STEP {name} rc=${{r}}'])
                 # A dangling io pointer once made every command-line UFS
@@ -114,6 +128,13 @@ def main():
                 step('load', f'load opdufs 4:2d {load} /adsp/AudioSphereModule.so.1', False)
                 tests.append(f'hash crc32 {load} ${{filesize}}')
                 tests.append('echo OPD2413_BLK_TESTS_END')
+                if a.efi_hello:
+                    # Only after the observer reserved and CRC'd the ABL handoff memory.
+                    efi = []
+                    step('efi_memmap', 'efidebug memmap', True, efi)
+                    step('efi_hello', 'bootefi hello', False, efi)
+                    tests.extend(['if test "${opd_efi_safe}" = 1; then ' + efi[0], *efi[1:],
+                                  'else echo OPD2413_EFI skipped: handoff memory not protected', 'fi'])
                 if a.ufs_trace:
                     # Regression for the session-io fix: the first block read
                     # from the command line (partition 0x42) used to restart
@@ -140,12 +161,13 @@ def main():
                                 ('OPD2413_UFS_WAKE', a.ufs_wake),
                                 ('OPD2413_UFS_BLK', a.ufs_blk),
                                 ('OPD2413_UFS_BLK_RAMDISK', a.ufs_blk_ramdisk),
-                                ('OPD2413_UFS_TRACE', a.ufs_trace)]:
+                                ('OPD2413_UFS_TRACE', a.ufs_trace),
+                                ('OPD2413_EFI', a.efi_hello)]:
             if (f'CONFIG_{symbol}=y' in config) != enabled:
                 raise ValueError('Snapshot configuration mismatch: ' + symbol)
         # This observer cannot initialize or write storage or persistent env.
         for symbol in ['UFS', 'MMC', 'SCSI', 'USB', 'MTD', 'SPI_FLASH', 'FASTBOOT',
-                       'CMD_SAVEENV', 'EFI_LOADER']:
+                       'CMD_SAVEENV', *([] if a.efi_hello else ['EFI_LOADER'])]:
             if f'CONFIG_{symbol}=y' in config:
                 raise ValueError('Unexpected observer capability: ' + symbol)
         if a.ufs_blk:
@@ -155,6 +177,15 @@ def main():
             for symbol in ['BLK', 'PARTITIONS', 'EFI_PARTITION', 'FS_FAT', 'FS_EXT4', 'CMD_TIME', 'CMD_HASH', 'HUSH_PARSER', 'HUSH_OLD_PARSER']:
                 if f'CONFIG_{symbol}=y' not in config:
                     raise ValueError('Read-only block build is missing ' + symbol)
+        if a.efi_hello:
+            for symbol in ['EFI_VARIABLE_FILE_STORE', 'EFI_VARIABLE_SF_STORE', 'EFI_MM_COMM_TEE', 'EFI_RT_VOLATILE_STORE',
+                           'EFI_HAVE_CAPSULE_SUPPORT', 'EFI_CAPSULE_ON_DISK', 'EFI_SET_TIME', 'EFI_TCG2_PROTOCOL',
+                           'EFI_HTTP_BOOT', 'CMD_NVEDIT_EFI', 'CMD_EFICONFIG']:
+                if f'CONFIG_{symbol}=y' in config:
+                    raise ValueError('EFI build has a persistent or unneeded capability: ' + symbol)
+            for symbol in ['EFI_VARIABLE_NO_STORE', 'CMD_BOOTEFI_HELLO', 'OPD2413_EFI']:
+                if f'CONFIG_{symbol}=y' not in config:
+                    raise ValueError('EFI build is missing ' + symbol)
         if 'CONFIG_ENV_IS_NOWHERE=y' not in config:
             raise ValueError('Observer environment must stay in RAM')
         shutil.copyfile(overlay/'layout.h', out/'opd2413_layout.h')

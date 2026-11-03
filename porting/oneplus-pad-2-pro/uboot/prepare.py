@@ -89,6 +89,9 @@ def main():
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n', blk_new)
     insert_before(mach/'Makefile', 'obj-y += dram.o', 'obj-$(CONFIG_OPD2413_UFS_BLK) += opd2413_ufs_blk.o\n')
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_EFI\n\tbool "Reserve the ABL handoff memory and allow bootefi"\n'
+                  '\tdepends on OPD2413_UFS_BLK && EFI_LOADER\n\tdefault n\n\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
                   'config OPD2413_UFS_TRACE\n\tbool "Debug: stack-frame check around UFS doorbells issued after board init"\n'
                   '\tdepends on OPD2413_UFS_READ\n\tdefault n\n\n')
     # Report every main_loop entry (re-entry diagnosis); other configs of this
