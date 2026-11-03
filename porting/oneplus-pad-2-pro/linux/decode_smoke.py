@@ -40,7 +40,7 @@ def recover_pmsg(data):
         if distance(ring[pos:pos + len(marker)], marker) > 12:
             continue
         candidates = []
-        for stage in ('initial', 'settled', 'final'):
+        for stage in ('initial', 'settled', 'handoff', 'booted', 'final'):
             for copy in range(5):
                 prefix = f'OPD_STATE_V1 BEGIN {stage} {copy} '.encode()
                 candidates.append((distance(ring[pos:pos + len(prefix)], prefix),

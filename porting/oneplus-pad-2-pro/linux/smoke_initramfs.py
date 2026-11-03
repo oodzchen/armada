@@ -56,6 +56,10 @@ snapshot() {
 		for f in /sys/class/udc/*/current_speed /sys/class/udc/*/maximum_speed; do
 			[ -r "$f" ] && echo "$f=$(cat $f)"
 		done
+		for c in /sys/devices/system/cpu/cpufreq/policy*; do
+			[ -d "$c" ] && echo "$(basename $c)=$(cat $c/scaling_governor 2>/dev/null) cur=$(cat $c/scaling_cur_freq 2>/dev/null) max=$(cat $c/scaling_max_freq 2>/dev/null)"
+		done
+		grep -Ei 'dwc3|usb' /proc/interrupts | tr -s ' ' | head -n 4
 		for f in /run/www/results.txt /run/ncm-host-verdict.txt; do
 			[ -r "$f" ] && { echo "$f:"; cat "$f"; }
 		done
@@ -178,7 +182,7 @@ NCM_TEST = r'''
 ncm_dev=
 R=/run/www/results.txt
 chunk_sums() {
-	size=$(wc -c < "$1")
+	size=$(stat -c %s "$1")
 	echo "$2 bytes=$size sha256=$(sha256sum "$1" | cut -d ' ' -f 1)" >> $R
 	n=0
 	while [ $((n * 67108864)) -lt $size ]; do
@@ -216,6 +220,67 @@ ncm_test() {
 ncm_test &
 '''
 
+NETROOT = r'''
+# Download the Armada root image over NCM into its own RAM tmpfs, check its
+# length and SHA-256 against the values built into this initramfs, then boot it
+# read-only with a tmpfs writable layer. Any failure returns to the countdown
+# and the reset back to Android. No block device other than loop is used.
+ncm_dev=
+R=/run/www/results.txt
+netroot() {
+	i=0
+	while [ -z "$ncm_dev" ] && [ $i -lt 60 ]; do
+		for n in /sys/class/net/*; do
+			[ "$(cat $n/address 2>/dev/null)" = @DEVICE_MAC@ ] && ncm_dev=$(basename $n)
+		done
+		[ -n "$ncm_dev" ] || sleep 1
+		i=$((i + 1))
+	done
+	[ -n "$ncm_dev" ] || { say 'netroot: no NCM interface after 60 s'; return; }
+	mkdir -p /run/www
+	ip link set "$ncm_dev" up && ip addr add 10.231.0.1/24 dev "$ncm_dev" || { say "netroot: cannot configure $ncm_dev"; return; }
+	httpd -p 10.231.0.1:80 -h /run/www || { say 'netroot: httpd failed'; return; }
+	echo "expect bytes=@ROOT_SIZE@ sha256=@ROOT_SHA256@" > $R
+	# Without a verified image in time, record the state and return to Android.
+	( sleep @NETROOT_TIMEOUT@; say 'netroot: no verified image in time'; snapshot final; reboot -f ) &
+	watchdog=$!
+	say "netroot: $ncm_dev up at 10.231.0.1, speed $(cat /sys/class/udc/*/current_speed 2>/dev/null)"
+	mkdir -p /netroot
+	mount -t tmpfs -o size=@ROOT_TMPFS_MIB@m,mode=0700 netroot /netroot || { say 'netroot: tmpfs failed'; return; }
+	nc -l -p 5002 < /dev/null > /netroot/root.squashfs || { say 'netroot: receive failed'; return; }
+	size=$(stat -c %s /netroot/root.squashfs)
+	digest=$(sha256sum /netroot/root.squashfs | cut -d ' ' -f 1)
+	echo "root bytes=$size sha256=$digest" >> $R
+	if [ "$size" != @ROOT_SIZE@ ] || [ "$digest" != @ROOT_SHA256@ ]; then
+		echo 'root mismatch' >> $R
+		say "netroot: image mismatch: $size bytes, sha256=$digest"
+		kill $watchdog
+		return
+	fi
+	echo 'root verified' >> $R
+	say "netroot: image verified, $size bytes"
+	insmod /opd/overlay.ko || { say 'netroot: overlay module failed'; return; }
+	mkdir -p /lower /rw /sysroot
+	mount -t squashfs -o ro,loop /netroot/root.squashfs /lower || { say 'netroot: squashfs mount failed'; return; }
+	mount -t tmpfs -o size=@UPPER_MIB@m,mode=0755 rw /rw && mkdir -p /rw/upper /rw/work || { say 'netroot: upper tmpfs failed'; return; }
+	mount -t overlay -o lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work overlay /sysroot || { say 'netroot: overlay mount failed'; return; }
+	cp -af /opd/overlay/. /sysroot/ || { say 'netroot: test overlay copy failed'; return; }
+	if grep -qw opd.nofw /proc/cmdline && [ -d /opd/overlay/usr/lib/firmware ]; then
+		(cd /opd/overlay && find usr/lib/firmware -type f) | while read -r f; do rm -f "/sysroot/$f"; done
+		say 'netroot: opd.nofw, test firmware removed'
+	fi
+	[ -x /sysroot/usr/lib/systemd/systemd ] || { say 'netroot: no systemd in image'; return; }
+	echo 'switching root' >> $R
+	snapshot handoff
+	kill $watchdog
+	killall httpd 2>/dev/null
+	say 'netroot: switch_root to systemd'
+	mount --move /dev /sysroot/dev && mount --move /proc /sysroot/proc && mount --move /sys /sysroot/sys || { echo 'netroot: cannot move mounts' > /dev/console; reboot -f; }
+	exec switch_root /sysroot /usr/lib/systemd/systemd
+}
+netroot
+'''
+
 
 def entry(name, mode, data=b'', ino=1, rdev=(0, 0)):
     name_b = name.encode() + b'\0'
@@ -223,6 +288,22 @@ def entry(name, mode, data=b'', ino=1, rdev=(0, 0)):
     head = b'070701' + b''.join(b'%08X' % f for f in fields)
     pad = lambda n: b'\0' * (-n % 4)
     return head + name_b + pad(len(head) + len(name_b)) + data + pad(len(data))
+
+
+def tree_entries(root, prefix):
+    """Directories, files and symlinks under root, as (name, mode, data); owned by root."""
+    yield prefix.split('/')[0], 0o40755, b''
+    yield prefix, 0o40755, b''
+    for path in sorted(root.rglob('*')):
+        name = f'{prefix}/{path.relative_to(root).as_posix()}'
+        if path.is_symlink():
+            yield name, 0o120777, str(path.readlink()).encode()
+        elif path.is_dir():
+            yield name, 0o40000 | (path.stat().st_mode & 0o7777), b''
+        elif path.is_file():
+            yield name, 0o100000 | (path.stat().st_mode & 0o7777), path.read_bytes()
+        else:
+            raise ValueError('unsupported file type: ' + str(path))
 
 
 def main():
@@ -237,6 +318,13 @@ def main():
                     help='Add the NCM transfer test (CONFIG_USB_CONFIGFS_NCM=y); ends the wait early')
     ap.add_argument('--ncm-tx-mib', type=int, default=256,
                     help='Random data the tablet generates for the host to download')
+    ap.add_argument('--netroot', metavar='SQUASHFS',
+                    help='Boot this root image received over NCM (needs --overlay-module, --netroot-tree)')
+    ap.add_argument('--overlay-module', type=Path, help='overlay.ko from the same kernel build')
+    ap.add_argument('--netroot-tree', type=Path, help='Test files copied over the root (netroot_overlay.py)')
+    ap.add_argument('--upper-mib', type=int, default=3072, help='tmpfs writable layer size')
+    ap.add_argument('--netroot-timeout', type=int, default=1200,
+                    help='Reset back to Android unless the image is verified within this time')
     ap.add_argument('--wait', type=int, default=120,
                     help='Seconds before the PSCI reset back to Android')
     ap.add_argument('--firmware', action='append', default=[], metavar='NAME=SHA256=FILE',
@@ -269,16 +357,32 @@ def main():
     blob += entry('bin/busybox', 0o100755, a.busybox.read_bytes(), ino=ino); ino += 1
     if a.wait < 30 or not 1 <= a.ncm_tx_mib <= 4096:
         raise ValueError('--wait must be at least 30 s and --ncm-tx-mib 1..4096')
+    if a.netroot and (a.usb_ncm or not a.overlay_module or not a.netroot_tree):
+        raise ValueError('--netroot replaces --usb-ncm and needs --overlay-module and --netroot-tree')
+    root_size = root_sha256 = None
+    if a.netroot:
+        digest = hashlib.sha256()
+        with open(a.netroot, 'rb') as image:
+            while block := image.read(1 << 24):
+                digest.update(block)
+        root_size, root_sha256 = Path(a.netroot).stat().st_size, digest.hexdigest()
+        for name, mode, data in tree_entries(a.netroot_tree, 'opd/overlay'):
+            blob += entry(name, mode, data, ino=ino); ino += 1
+        blob += entry('opd/overlay.ko', 0o100644, a.overlay_module.read_bytes(), ino=ino); ino += 1
     functions = ([('ACM log', ACM_SETUP)] if a.usb_log else []) + \
-                ([('NCM test', NCM_SETUP)] if a.usb_ncm else [])
+                ([('NCM test', NCM_SETUP)] if a.usb_ncm or a.netroot else [])
     gadget = ''
     if functions:
         gadget = USB_GADGET.replace('@FUNCTIONS@', ' + '.join(name for name, _ in functions)) \
                            .replace('@FUNCTION_SETUP@', ''.join(setup for _, setup in functions))
     init = INIT.replace('# USB_LOG_HOOK', gadget) \
-               .replace('# NCM_TEST_HOOK', NCM_TEST if a.usb_ncm else '') \
+               .replace('# NCM_TEST_HOOK', NETROOT if a.netroot else NCM_TEST if a.usb_ncm else '') \
                .replace('@WAIT@', str(a.wait)) \
                .replace('@TX_MIB@', str(a.ncm_tx_mib)) \
+               .replace('@ROOT_SIZE@', str(root_size)).replace('@ROOT_SHA256@', str(root_sha256)) \
+               .replace('@ROOT_TMPFS_MIB@', str(((root_size or 0) >> 20) + 64)) \
+               .replace('@UPPER_MIB@', str(a.upper_mib)) \
+               .replace('@NETROOT_TIMEOUT@', str(a.netroot_timeout)) \
                .replace('@DEVICE_MAC@', NCM_DEVICE_MAC).replace('@HOST_MAC@', NCM_HOST_MAC)
     assert '@' not in init.replace('$@', ''), 'unreplaced placeholder'
     blob += entry('init', 0o100755, init.encode(), ino=ino); ino += 1
