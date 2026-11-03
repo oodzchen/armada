@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the OPD2413 Linux smoke-test initramfs (gzip newc cpio, no root needed).
+"""Build the OPD2413 Linux smoke-test initramfs (newc cpio, no root needed).
 
 The init script only reads: it mounts proc, sysfs and devtmpfs, prints what
 the kernel found to the console, then reboots after a countdown. It never
@@ -9,6 +9,7 @@ import argparse
 import gzip
 import hashlib
 from pathlib import Path, PurePosixPath
+import subprocess
 
 INIT = r'''#!/bin/busybox sh
 /bin/busybox --install -s /bin
@@ -19,7 +20,7 @@ mkdir -p /run
 # Every line goes to the console and to /dev/kmsg, so it also lands in the
 # ramoops console zone that Android shows after the reset.
 say() { echo "$*"; echo "opd-smoke: $*" > /dev/kmsg; }
-# A firmware reset can flip bits in retained RAM. Save five copies with a
+# A firmware reset can flip bits in retained RAM. Save 25 copies with a
 # digest in pmsg, independently of the human-readable console log.
 record() {
 	if [ -w /dev/pmsg0 ]; then echo "$*" > /dev/pmsg0
@@ -35,6 +36,14 @@ snapshot() {
 		echo "fb=$(cat /proc/fb 2>/dev/null | tr '\n' ' ')"
 		echo "drm=$(ls /sys/class/drm 2>/dev/null | tr '\n' ' ')"
 		echo "block=$(ls /sys/class/block 2>/dev/null | tr '\n' ' ')"
+		echo "usb=$(ls /sys/bus/usb/devices 2>/dev/null | tr '\n' ' ')"
+		for f in /sys/class/udc/*/state /sys/class/usb_role/*/role /sys/class/typec/port*/data_role /sys/class/typec/port*/power_role /sys/class/remoteproc/remoteproc*/name /sys/class/remoteproc/remoteproc*/state; do
+			[ -r "$f" ] && echo "$f=$(cat $f)"
+		done
+		if [ -r /sys/kernel/debug/devices_deferred ]; then
+			echo 'deferred-probes:'
+			cat /sys/kernel/debug/devices_deferred
+		fi
 		for e in /sys/class/input/event*; do
 			[ -r "$e/device/name" ] && echo "input.$(basename $e)=$(cat $e/device/name)"
 		done
@@ -44,12 +53,14 @@ snapshot() {
 			echo "$(basename $f).first240=$(head -c 240 $f | hexdump -v -e '/1 "%02x"')"
 		done
 		dmesg | grep -E 'nt36536.*(firmware|resume|chip id|fw_ver)' | tail -n 6
+		dmesg | grep -Ei 'remoteproc|dwc3|usb |scmi|ucsi|glink|typec|wcd939' | tail -n 60
 	} > /run/smoke-state
 	digest=$(sha256sum /run/smoke-state | cut -d ' ' -f 1)
 	length=$(wc -c < /run/smoke-state)
 	base64 /run/smoke-state > /run/smoke-state.b64
-	copy=0
-	while [ $copy -lt 5 ]; do
+	replica=0
+	while [ $replica -lt 25 ]; do
+		copy=$((replica % 5))
 		record "OPD_STATE_V1 BEGIN $stage $copy $length $digest"
 		part=0
 		while IFS= read -r line; do
@@ -57,7 +68,7 @@ snapshot() {
 			part=$((part + 1))
 		done < /run/smoke-state.b64
 		record "OPD_STATE_V1 END $stage $copy"
-		copy=$((copy + 1))
+		replica=$((replica + 1))
 	done
 	say "state $stage saved: $length bytes, sha256=$digest"
 }
@@ -82,6 +93,8 @@ for b in /sys/class/backlight/*; do
 done
 say "regulators: $(ls /sys/class/regulator 2>/dev/null | wc -l), enabled: $(cat /sys/class/regulator/*/state 2>/dev/null | grep -c enabled)"
 say "drm: $(ls /sys/class/drm 2>/dev/null | tr '\n' ' ') block (not opened): $(ls /sys/class/block 2>/dev/null | tr '\n' ' ')"
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+# USB_LOG_HOOK
 for e in /sys/class/input/event*; do
 	if [ -r "$e/device/name" ] && grep -Eiq 'novatek|nt36536|nvt' "$e/device/name"; then
 		say "capturing $(basename $e): $(cat $e/device/name)"
@@ -102,6 +115,41 @@ say "rebooting"
 reboot -f
 '''
 
+USB_LOG = r'''
+# Output only: stream kernel messages to the host through a RAM ACM gadget.
+usb_log() {
+	mount -t configfs configfs /sys/kernel/config || return
+	g=/sys/kernel/config/usb_gadget/opd-smoke
+	mkdir -p "$g" || return
+	echo 0x1d6b > "$g/idVendor" || return
+	echo 0x0104 > "$g/idProduct" || return
+	mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409"
+	echo armada-opd-smoke > "$g/strings/0x409/serialnumber"
+	echo Armada > "$g/strings/0x409/manufacturer"
+	echo 'OPD2413 RAM kernel log' > "$g/strings/0x409/product"
+	echo 'ACM log' > "$g/configs/c.1/strings/0x409/configuration"
+	echo 100 > "$g/configs/c.1/MaxPower"
+	mkdir "$g/functions/acm.GS0" || return
+	ln -s "$g/functions/acm.GS0" "$g/configs/c.1/acm.GS0" || return
+	i=0
+	while [ $i -lt 30 ]; do
+		set -- /sys/class/udc/*
+		if [ -e "$1" ]; then
+			[ $# -eq 1 ] || { say 'USB log: ambiguous UDC'; return; }
+			udc=$(basename "$1")
+			echo "$udc" > "$g/UDC" || return
+			say "USB log: bound to $udc"
+			cat /dev/kmsg > /dev/ttyGS0
+			return
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	say 'USB log: no UDC after 30 s'
+}
+usb_log &
+'''
+
 
 def entry(name, mode, data=b'', ino=1, rdev=(0, 0)):
     name_b = name.encode() + b'\0'
@@ -115,6 +163,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--busybox', type=Path, required=True, help='static aarch64 busybox')
     ap.add_argument('--out', type=Path, required=True)
+    ap.add_argument('--compression', choices=('gzip', 'zstd'), default='gzip',
+                    help='zstd requires host zstd and kernel CONFIG_RD_ZSTD=y')
+    ap.add_argument('--usb-log', action='store_true',
+                    help='Start an output-only ACM kernel log gadget (CONFIG_USB_CONFIGFS_ACM=y)')
     ap.add_argument('--firmware', action='append', default=[], metavar='NAME=SHA256=FILE',
                     help='Add a hash-verified private firmware file under /lib/firmware (repeatable)')
     a = ap.parse_args()
@@ -143,9 +195,15 @@ def main():
     blob += entry('dev/console', 0o20600, ino=ino, rdev=(5, 1)); ino += 1
     blob += entry('dev/tty0', 0o20620, ino=ino, rdev=(4, 0)); ino += 1
     blob += entry('bin/busybox', 0o100755, a.busybox.read_bytes(), ino=ino); ino += 1
-    blob += entry('init', 0o100755, INIT.encode(), ino=ino); ino += 1
+    init = INIT.replace('# USB_LOG_HOOK', USB_LOG if a.usb_log else '')
+    blob += entry('init', 0o100755, init.encode(), ino=ino); ino += 1
     blob += entry('TRAILER!!!', 0)
-    a.out.write_bytes(gzip.compress(blob, 9))
+    if a.compression == 'zstd':
+        compressed = subprocess.run(['zstd', '-q', '-19', '-T1', '-c'], input=blob,
+                                    stdout=subprocess.PIPE, check=True).stdout
+    else:
+        compressed = gzip.compress(blob, 9)
+    a.out.write_bytes(compressed)
     print(f'{a.out}: {a.out.stat().st_size} bytes')
 
 

@@ -2,6 +2,7 @@
 """Exercise recovery and rejection of damaged retained-RAM evidence."""
 import base64
 import hashlib
+import random
 import unittest
 from decode_smoke import decode
 
@@ -56,6 +57,14 @@ class Recovery(unittest.TestCase):
             prefix = f'OPD_STATE_V1 DATA final {copy} 0 '.encode()
             offset = log.index(prefix) + len(prefix) + 7
             log = log[:offset] + bytes([log[offset] ^ 1]) + log[offset + 1:]
+        self.assertEqual(decode(log)['final'], STATE)
+
+    def test_twenty_five_copies_with_noise(self):
+        log = bytearray((records() + b'\n') * 5)
+        rng = random.Random(2413)
+        for i in range(len(log)):
+            if rng.random() < 0.12:
+                log[i] ^= 1 << rng.randrange(8)
         self.assertEqual(decode(log)['final'], STATE)
 
     def test_unrecoverable_corruption_rejected(self):
