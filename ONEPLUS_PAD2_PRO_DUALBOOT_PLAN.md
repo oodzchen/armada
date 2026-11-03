@@ -1010,6 +1010,15 @@ CRC verified; 0 bytes recovered relative to first replica
 - 已整理为补丁：`1403`（面板 prepare 断电重试 3 次）、`1404`（DSI 7nm PLL 锁定失败时撤销启动与偏置）、`1405`（命令 DMA 超时转储两路 DSI 寄存器、链路时钟使能失败报错，仅错误路径输出）。调试期间的 PLL 锁定日志与首次失败调用栈未纳入。证据：`stress1/2/4/5/runs/`。
 - 待选方向：①超时后对两路 DSI 主机做完整断电/复位/重配置再重试；②开机首个 prepare 沿用 ABL 已点亮的面板（不复位、不发初始化序列，类似 continuous splash）；③对照厂商 SDE 驱动的双 DSI 命令广播流程（DMA 触发顺序、同步配置）。
 
+### 19.14 开机黑屏：显式硬件广播候选（2026-11-03，离线准备）
+
+- 目标：消除 19.13 的命令 DMA 启动竞态；不引入延时、重试或连续显示绕过。Linux 接管的显示故障与 kShimC 菜单区分验证。
+- 原始证据：`stress5/runs/dmesg-05.txt` 首条 `ff 20` 超时，DSI1 `STATUS0=0x20003`；当前 `dsi_ctrl_enable` 从未设置 `CMD_DMA_CTRL.BROADCAST_EN`，manager 直接先触发 DSI0 再触发 DSI1。
+- 复用：OnePlusOSS SM8750 Android 16 的 `dsi_display_broadcast_cmd` / `dsi_ctrl_hw_cmn_kickoff_command` 明确配置 bit31 广播、bit30 主端，先 stage 两端，再触发从端、最后主端；只在主端等完成 IRQ。另有同 SoC Lenovo 开发者在 2026-11-02 的 dri-devel 原始回复报告相同 `0x20003` 症状（线索，不能代替本机实测）。原始源码保存在 `/tmp/opd-vendor-*`。
+- 单变量实验：保留 stress5 的内核配置、DT、initramfs、诊断与已证伪的旧重试，以 `broadcast1/before/` 保存源码和二进制；只替换 SM8750 同步写命令的 DMA 广播路径。完成后须去掉面板盲重试等临时诊断。
+- 判据：面板第一次 prepare 成功、DCS/DMA/vblank 超时为 0，显示提交后两端硬件均完成；重复临时启动对照（目标至少 20 次）且每轮 Android 槽位/boot 哈希不变。若同样失败两次，停止当前候选，回到最早错误层。
+- 尚未上机；设备仍在 Android。上机前形成镜像哈希、负载核对和独立审查，遵循 18.5 的每轮确认要求。
+
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 
 | 内容 | 位置 |
