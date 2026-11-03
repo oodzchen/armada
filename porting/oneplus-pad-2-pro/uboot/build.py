@@ -26,6 +26,15 @@ def main():
     ap.add_argument('--ufs-blk', action='store_true', help='Read-only opdufs block devices with FAT/ext4 read tests (implies --ufs-wake); no writes, no EFI')
     ap.add_argument('--efi-hello', action='store_true', help='With the opdufs tests, enable the EFI loader (volatile variables only, ABL handoff memory reserved and CRC-checked) and run bootefi hello (implies --ufs-blk)')
     ap.add_argument('--efi-esp', type=Path, metavar='BOOTAA64.EFI', help='With --efi-hello: embed a FAT ESP holding this EFI program as /EFI/BOOT/BOOTAA64.EFI plus loader/loader.conf, map it with blkmap and bootefi it (implies --efi-hello)')
+    ap.add_argument('--esp-blob', action='store_true', help='With --efi-esp: write the ESP to esp.img for a kShimC Type=Blob entry named "OPD2413 ESP" instead of embedding it in U-Boot')
+    ap.add_argument('--linux', type=Path, metavar='VMLINUZ.EFI', help='With --efi-menu: add a systemd-boot entry for this EFI-stub kernel')
+    ap.add_argument('--linux-dtb', type=Path, help='Device tree for the --linux entry')
+    ap.add_argument('--linux-initrd', type=Path, help='initramfs for the --linux entry')
+    ap.add_argument('--linux-options', default='', help='Kernel command line for the --linux entry')
+    ap.add_argument('--linux-title', default='Linux', help='Menu title for the --linux entry')
+    ap.add_argument('--linux-entry', action='append', default=[], metavar='TITLE|DTB|OPTIONS',
+                    help='Additional entry with the same --linux kernel and initrd (repeatable)')
+    ap.add_argument('--esp-default', default='auto-reboot', help='systemd-boot default entry id (e.g. linux.conf for an unattended QEMU run)')
     ap.add_argument('--keys', action='store_true', help='Read-only volume/power keys over SPMI as U-Boot input, with a key test step (implies --ufs-blk)')
     ap.add_argument('--efi-menu', action='store_true', help='With --efi-esp: systemd-boot menu with an EFI hello entry and Reboot (EFI reset returns to Android), driven by the keys (implies --keys)')
     ap.add_argument('--ufs-trace', action='store_true', help='Debug with --ufs-blk: stack-frame check around doorbells after board init; a main_loop re-entry halts with no further UFS command')
@@ -35,6 +44,10 @@ def main():
     a = ap.parse_args()
     if a.efi_menu and a.efi_esp is None:
         ap.error('--efi-menu needs --efi-esp')
+    if a.esp_blob and a.efi_esp is None:
+        ap.error('--esp-blob needs --efi-esp')
+    if a.linux and not (a.efi_menu and a.linux_dtb and a.linux_initrd):
+        ap.error('--linux needs --efi-menu, --linux-dtb and --linux-initrd')
     a.keys |= a.efi_menu
     a.efi_hello |= a.efi_esp is not None
     a.ufs_blk |= a.ufs_blk_ramdisk or a.efi_hello or a.keys
@@ -100,8 +113,26 @@ def main():
             if a.efi_esp:
                 esp = out/'esp.img'
                 esp.unlink(missing_ok=True)
-                run(['mkfs.vfat', '-C', '-n', 'OPDESP', esp, '4096'], log)
+                extra = [e.split('|', 2) for e in a.linux_entry]
+                if any(len(e) != 3 for e in extra):
+                    raise ValueError('--linux-entry must be TITLE|DTB|OPTIONS')
+                payload = [a.efi_esp] + ([a.linux, a.linux_dtb, a.linux_initrd] if a.linux else []) + [Path(e[1]) for e in extra]
+                kib = 4096 + sum(f.stat().st_size for f in payload) // 1024 * 11 // 10
+                run(['mkfs.vfat', '-C', '-n', 'OPDESP', esp, str(-(-kib // 1024) * 1024)], log)
                 run(['mmd', '-i', esp, '::/EFI', '::/EFI/BOOT', '::/EFI/opd', '::/loader', '::/loader/entries'], log)
+                if a.linux:
+                    for f, name in [(a.linux, 'vmlinuz.efi'), (a.linux_dtb, 'board.dtb'), (a.linux_initrd, 'initramfs.cpio.gz')]:
+                        run(['mcopy', '-i', esp, f.resolve(), '::/EFI/opd/' + name], log)
+                    (out/'linux.conf').write_text(f'title {a.linux_title}\nlinux /EFI/opd/vmlinuz.efi\n'
+                                                  f'devicetree /EFI/opd/board.dtb\ninitrd /EFI/opd/initramfs.cpio.gz\n'
+                                                  f'options {a.linux_options}\n')
+                    run(['mcopy', '-i', esp, out/'linux.conf', '::/loader/entries/linux.conf'], log)
+                    for n, (title, dtb, options) in enumerate(extra, 2):
+                        run(['mcopy', '-i', esp, Path(dtb).resolve(), f'::/EFI/opd/board{n}.dtb'], log)
+                        (out/f'linux{n}.conf').write_text(f'title {title}\nlinux /EFI/opd/vmlinuz.efi\n'
+                                                          f'devicetree /EFI/opd/board{n}.dtb\ninitrd /EFI/opd/initramfs.cpio.gz\n'
+                                                          f'options {options}\n')
+                        run(['mcopy', '-i', esp, out/f'linux{n}.conf', f'::/loader/entries/linux{n}.conf'], log)
                 run(['mcopy', '-i', esp, a.efi_esp.resolve(), '::/EFI/BOOT/BOOTAA64.EFI'], log)
                 if a.efi_menu:
                     # U-Boot's own hello world as a chainloaded entry; "Reboot"
@@ -112,14 +143,15 @@ def main():
                     (out/'hello.conf').write_text('title EFI hello (returns to this menu)\nefi /EFI/opd/hello.efi\n')
                     run(['mcopy', '-i', esp, out/'hello.conf', '::/loader/entries/hello.conf'], log)
                     # The QEMU ramdisk build has no keys: a short timeout picks Reboot.
-                    (out/'loader.conf').write_text(f'timeout {3 if a.ufs_blk_ramdisk else 30}\ndefault auto-reboot\nauto-reboot yes\nauto-firmware no\n'
+                    (out/'loader.conf').write_text(f'timeout {3 if a.ufs_blk_ramdisk else 30}\ndefault {a.esp_default}\nauto-reboot yes\nauto-firmware no\n'
                                                    'editor no\nconsole-mode keep\n')
                 else:
                     (out/'loader.conf').write_text('timeout 5\nconsole-mode keep\n')
                 run(['mcopy', '-i', esp, out/'loader.conf', '::/loader/loader.conf'], log)
-                for symbol in ['BLKMAP', 'CMD_BLKMAP', 'OPD2413_EFI_ESP']:
+                for symbol in ['BLKMAP', 'CMD_BLKMAP', 'OPD2413_EFI_ESP_BLOB' if a.esp_blob else 'OPD2413_EFI_ESP']:
                     run([src/'scripts/config', '--file', out/'build/.config', '--enable', symbol], log)
-                run([src/'scripts/config', '--file', out/'build/.config', '--set-str', 'OPD2413_EFI_ESP_IMAGE', esp], log)
+                if not a.esp_blob:
+                    run([src/'scripts/config', '--file', out/'build/.config', '--set-str', 'OPD2413_EFI_ESP_IMAGE', esp], log)
         if a.ufs_nop or a.ufs_link_check or a.ufs_read:
             # Keep the probe result visible during the countdown instead of
             # scrolling it away with the long bdinfo memory-bank listing.
@@ -218,7 +250,8 @@ def main():
                                 ('OPD2413_UFS_BLK_RAMDISK', a.ufs_blk_ramdisk),
                                 ('OPD2413_UFS_TRACE', a.ufs_trace),
                                 ('OPD2413_EFI', a.efi_hello),
-                                ('OPD2413_EFI_ESP', a.efi_esp is not None),
+                                ('OPD2413_EFI_ESP', a.efi_esp is not None and not a.esp_blob),
+                                ('OPD2413_EFI_ESP_BLOB', a.esp_blob),
                                 ('BLKMAP', a.efi_esp is not None),
                                 ('OPD2413_KEYS', a.keys)]:
             if (f'CONFIG_{symbol}=y' in config) != enabled:

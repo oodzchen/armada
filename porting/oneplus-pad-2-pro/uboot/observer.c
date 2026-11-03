@@ -27,6 +27,7 @@
 #include "opd2413_ufs_blk.h"
 #endif
 #ifdef CONFIG_OPD2413_EFI
+#include <efi_loader.h>
 #include <env.h>
 #include <lmb.h>
 #endif
@@ -322,6 +323,52 @@ static int protect(u64 base, u64 end, unsigned *pieces)
 	return 0;
 }
 
+#ifdef CONFIG_OPD2413_EFI_ESP_BLOB
+/*
+ * The ESP travels as a Type=Blob entry named "OPD2413 ESP" in the kShimC
+ * manifest of the ABL-loaded image (header at OPD_ABL_BASE, MultiBootKernel
+ * Patcher layout: +0x10 runtime size, +0x20/+0x28 manifest offset/size,
+ * 60-byte header 'KPMF' 0.1, 56-byte entries plus a 4-byte aligned name,
+ * entry offsets relative to the header). Never executed by kShimC.
+ */
+#define OPD_ESP_BLOB_NAME "OPD2413 ESP"
+static u64 le64_at(const u8 *p) { u64 v; memcpy(&v, p, 8); return v; }
+static u32 le32_at(const u8 *p) { u32 v; memcpy(&v, p, 4); return v; }
+
+static int find_esp_blob(u64 limit, u64 *addr, u64 *size)
+{
+	const u8 *img = (const u8 *)OPD_ABL_BASE;
+	u64 runtime = le64_at(img + 0x10), moff = le64_at(img + 0x20), msize = le64_at(img + 0x28);
+	if (runtime > limit - OPD_ABL_BASE || moff > runtime || msize > runtime - moff || msize < 60 ||
+	    le32_at(img + moff) != 0x464D504B || le32_at(img + moff + 4) != 0x00010000) {
+		printf("OPD2413_EFI_ESP no kShimC manifest (runtime %llx manifest %llx+%llx)\n", runtime, moff, msize);
+		return -1;
+	}
+	u32 count = le32_at(img + moff + 8);
+	u64 cursor = 60;
+	for (u32 i = 0; i < count && i < 50; ++i) {
+		if (cursor + 56 > msize) break;
+		const u8 *e = img + moff + cursor;
+		u32 len = le32_at(e + 52);
+		if (len > msize - cursor - 56) break;
+		u64 off = le64_at(e), sz = le64_at(e + 8);
+		if (le32_at(e + 16) == 4 && len == strlen(OPD_ESP_BLOB_NAME) &&
+		    !memcmp(e + 56, OPD_ESP_BLOB_NAME, len)) {
+			if (off > runtime || sz > runtime - off || sz < 512 || sz % 512 ||
+			    img[off + 510] != 0x55 || img[off + 511] != 0xaa) {
+				printf("OPD2413_EFI_ESP blob %llx+%llx is not a FAT image\n", off, sz);
+				return -1;
+			}
+			*addr = OPD_ABL_BASE + off; *size = sz;
+			return 0;
+		}
+		cursor += (56 + len + 3) & ~3ULL;
+	}
+	printf("OPD2413_EFI_ESP no \"%s\" blob in the manifest\n", OPD_ESP_BLOB_NAME);
+	return -1;
+}
+#endif
+
 /* Allocation anywhere in [base, end) must now be impossible. */
 static int unallocatable(u64 base, u64 end)
 {
@@ -373,10 +420,30 @@ static void efi_protect(void)
 			printf("OPD2413_EFI_PROTECT failed; EFI disabled\n");
 			return;
 		}
+	/* ABL's copy of the packed image must end before its FDT and initrd. */
+	u64 image_end = OPD_ABL_BASE + *(const u64 *)(OPD_ABL_BASE + 0x10);
+	if (image_end > min((u64)(uintptr_t)fdt, rd_start)) {
+		printf("OPD2413_EFI_PROTECT image end %llx overlaps the FDT/initrd; EFI disabled\n", image_end);
+		return;
+	}
+	/* An OS started through EFI must not reuse the ramoops zone: keep the
+	 * observer log readable after it (EFI reserved, not boot services data). */
+	if (efi_add_memory_map(LOG_BASE, OPD_RAMOOPS_SIZE, EFI_RESERVED_MEMORY_TYPE) != EFI_SUCCESS) {
+		printf("OPD2413_EFI_PROTECT ramoops EFI reservation failed; EFI disabled\n");
+		return;
+	}
 	abl_crc = crc32(0, (const void *)OPD_ABL_BASE, abl_end - OPD_ABL_BASE);
 	printf("OPD2413_EFI_PROTECT abl=%llx-%llx initrd=%llx-%llx crc=%08x pieces=%u\n",
 	       OPD_ABL_BASE, abl_end, rd_start, rd_end, abl_crc, pieces);
 	env_set("opd_efi_safe", "1");
+#ifdef CONFIG_OPD2413_EFI_ESP_BLOB
+	u64 esp_addr, esp_size;
+	if (!find_esp_blob(abl_end, &esp_addr, &esp_size)) {
+		env_set_hex("opd_esp_addr", esp_addr);
+		env_set_hex("opd_esp_blocks", esp_size / 512);
+		printf("OPD2413_EFI_ESP blob addr=%llx size=%llu (inside the CRC-checked ABL range)\n", esp_addr, esp_size);
+	}
+#endif
 #ifdef CONFIG_OPD2413_EFI_ESP
 	size_t esp = opd2413_esp_end - opd2413_esp_start;
 	env_set_hex("opd_esp_addr", (ulong)opd2413_esp_start);
@@ -484,6 +551,17 @@ static int do_opd_keys(struct cmd_tbl *cmdtp, int flag, int argc, char *const ar
 	return CMD_RET_SUCCESS;
 }
 U_BOOT_CMD(opd_keys, 2, 0, do_opd_keys, "read-only volume/power key test", "[seconds]");
+#endif
+
+#ifdef CONFIG_OPD2413_UFS_BLK
+#include <bootm.h>
+/* ExitBootServices (an OS loaded through EFI): hand UFS over in ABL's state
+ * (power mode, queue, Hibern8), as when ABL itself starts a kernel. */
+void board_quiesce_devices(void)
+{
+	printf("OPD2413_EXIT_BOOT_SERVICES restoring UFS: %s\n",
+	       opd2413_ufs_blk_stop() ? "FAILED (the next OS must reset UFS)" : "restored");
+}
 #endif
 
 int opd2413_observer_late(void)

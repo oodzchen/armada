@@ -6,6 +6,7 @@ preallocation and swap reservation are disabled. No physical device is used.
 """
 import argparse
 import json
+import struct
 from pathlib import Path
 import socket
 import subprocess
@@ -79,7 +80,7 @@ mark:
 """
 
 def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=False, ufs_nop=False, ufs_link=False, ufs_read=False,
-         loaders=(), blk_ramdisk=False):
+         loaders=(), blk_ramdisk=False, manifest_blob=None):
     out.mkdir(parents=True, exist_ok=True)
     (out/'entry.S').write_text(ENTRY + (DROP_EL1 if el==1 else '    ldr x4, =0xb9000000\n    br x4\n'))
     subprocess.run(['aarch64-linux-gnu-gcc','-nostdlib','-static','-Wl,--build-id=none',
@@ -90,6 +91,23 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
         subprocess.run(['aarch64-linux-gnu-gcc','-nostdlib','-static','-Wl,--build-id=none',
                         '-Wl,-Ttext=0xa8000000',str(out/'sentinel.S'),'-o',str(out/'sentinel.elf')],check=True)
         subprocess.run(['aarch64-linux-gnu-objcopy','-O','binary',str(out/'sentinel.elf'),str(out/'sentinel.bin')],check=True)
+        if manifest_blob:
+            # A minimal kShimC manifest (MultiBootKernelPatcher layout) with one
+            # Type=Blob entry "OPD2413 ESP", as in a packed boot image.
+            image = bytearray((out/'sentinel.bin').read_bytes())
+            image += bytes(-len(image) % 4096)
+            blob_off, blob = len(image), manifest_blob.read_bytes()
+            image += blob + bytes(-len(blob) % 8)
+            name = b'OPD2413 ESP'
+            entry = struct.pack('<QQIIQIIIQI', blob_off, len(blob), 4, 0, 0, 0, 0, 2, 0, len(name)) + name
+            entry += bytes(-len(entry) % 4)
+            header = struct.pack('<IHHIII', 0x464D504B, 0, 1, 1, 0, 0) + bytes(40)
+            manifest = header + entry
+            moff = len(image)
+            image += manifest
+            struct.pack_into('<Q', image, 0x10, len(image))
+            struct.pack_into('<QQ', image, 0x20, moff, len(manifest))
+            (out/'sentinel.bin').write_bytes(bytes(image))
     sock=out/'qmp.sock';sock.unlink(missing_ok=True)
     command=['qemu-system-aarch64','-M','virt,virtualization=on,memory-backend=ram',
              '-cpu','cortex-a76','-smp','1','-m','48G','-object',
@@ -195,6 +213,12 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
                 qmp('quit')
                 print(f'EL{el}: PASS (CRC, high memory, framebuffer, END' + (', Linux entry contract)' if handoff else ')'))
                 return
+            # The screen (e.g. a kernel's earlycon=efifb output) for diagnosis.
+            try:qmp('stop');qmp('pmemsave',{'val':0xfc800000,'size':3392*2400*4,'filename':str(out/'framebuffer-timeout.bin')})
+            except (OSError,RuntimeError,ValueError):pass
+            try:
+                qmp('pmemsave',{'val':0x880000000,'size':0x40000,'filename':str(out/'ramconsole.bin')})
+            except (OSError,RuntimeError,ValueError):pass
             try:
                 text,_=decode((out/'ramconsole.bin').read_bytes(),raw=True)
                 (out/'console-timeout.log').write_bytes(text)
@@ -217,6 +241,7 @@ def main():
     ap.add_argument('--ufs-link-check', action='store_true', help='Check link-state preflight refuses the fake/absent hardware')
     ap.add_argument('--ufs-read', action='store_true', help='Check the read-only survey preflight refuses the fake/absent hardware (requires --smmu-snapshot)')
     ap.add_argument('--loader', action='append', default=[], metavar='FILE@ADDR', help='Extra guest-physical file load')
+    ap.add_argument('--manifest-blob', type=Path, metavar='ESP.IMG', help='Append a kShimC manifest with this file as the "OPD2413 ESP" Blob to the kernel sentinel (needs --handoff)')
     ap.add_argument('--blk-ramdisk', action='store_true', help='Expect the RAM-backed opdufs test build (--ufs-blk-ramdisk) to finish its block tests')
     a=ap.parse_args()
     loaders=[(Path(f).resolve(),int(addr,0)) for f,addr in (s.rsplit('@',1) for s in a.loader)]
@@ -224,6 +249,6 @@ def main():
     if a.ufs_nop and not a.smmu_snapshot:ap.error('--ufs-nop requires --smmu-snapshot')
     if a.ufs_read and not a.smmu_snapshot:ap.error('--ufs-read requires --smmu-snapshot')
     for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff,a.ufs_snapshot,a.smmu_snapshot,a.ufs_nop,a.ufs_link_check,a.ufs_read,
-                         loaders,a.blk_ramdisk)
+                         loaders,a.blk_ramdisk,a.manifest_blob.resolve() if a.manifest_blob else None)
 
 if __name__=='__main__':main()

@@ -100,6 +100,9 @@ def main():
                   'config OPD2413_EFI_ESP_IMAGE\n\tstring "Path of the embedded ESP image"\n'
                   '\tdepends on OPD2413_EFI_ESP\n\tdefault ""\n\n')
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_EFI_ESP_BLOB\n\tbool "Use the ESP Blob from the kShimC manifest (read-only)"\n'
+                  '\tdepends on OPD2413_EFI && BLKMAP && !OPD2413_EFI_ESP\n\tdefault n\n\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
                   'config OPD2413_EFI\n\tbool "Reserve the ABL handoff memory and allow bootefi"\n'
                   '\tdepends on OPD2413_UFS_BLK && EFI_LOADER\n\tdefault n\n\n')
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
