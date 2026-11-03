@@ -1,0 +1,1787 @@
+From: Armada contributors
+Subject: [PATCH] opd2413 sm8750 board resources
+
+Ported from yzddmr6/linux-sm8750-erhai at
+70b572544d504735e2924f6c3f5fe3bd726ef275, relative to Linux v7.2.14.
+Adapted to Armada Linux 7.2.6; retain existing Armada GPU/CPU/pin definitions.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8750.dtsi b/arch/arm64/boot/dts/qcom/sm8750.dtsi
+--- a/arch/arm64/boot/dts/qcom/sm8750.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8750.dtsi
+@@ -34,16 +34,41 @@
+ 	#address-cells = <2>;
+ 	#size-cells = <2>;
+ 
++	csiphy_opp_table: opp-table-csiphy {
++		compatible = "operating-points-v2";
++
++		opp-266666667 {
++			opp-hz = /bits/ 64 <266666667>;
++			required-opps = <&rpmhpd_opp_low_svs_d1>,
++					<&rpmhpd_opp_low_svs_d1>,
++					<&rpmhpd_opp_low_svs_d1>;
++		};
++
++		opp-400000000 {
++			opp-hz = /bits/ 64 <400000000>;
++			required-opps = <&rpmhpd_opp_low_svs>,
++					<&rpmhpd_opp_low_svs>,
++					<&rpmhpd_opp_low_svs>;
++		};
++
++		opp-480000000 {
++			opp-hz = /bits/ 64 <480000000>;
++			required-opps = <&rpmhpd_opp_svs>,
++					<&rpmhpd_opp_svs>,
++					<&rpmhpd_opp_svs>;
++		};
++	};
++
+ 	cpus {
+ 		#address-cells = <2>;
+ 		#size-cells = <0>;
+ 
+ 		cpu0: cpu@0 {
++			capacity-dmips-mhz = <1792>;
+ 			device_type = "cpu";
+ 			compatible = "qcom,oryon";
+ 			reg = <0x0 0x0>;
+ 			enable-method = "psci";
+-			capacity-dmips-mhz = <1792>;
+ 			next-level-cache = <&l2_0>;
+ 			power-domains = <&cpu_pd0>, <&scmi_dvfs 0>;
+ 			power-domain-names = "psci", "perf";
+@@ -57,11 +82,11 @@
+ 		};
+ 
+ 		cpu1: cpu@100 {
++			capacity-dmips-mhz = <1792>;
+ 			device_type = "cpu";
+ 			compatible = "qcom,oryon";
+ 			reg = <0x0 0x100>;
+ 			enable-method = "psci";
+-			capacity-dmips-mhz = <1792>;
+ 			next-level-cache = <&l2_0>;
+ 			power-domains = <&cpu_pd1>, <&scmi_dvfs 0>;
+ 			power-domain-names = "psci", "perf";
+@@ -69,11 +94,11 @@
+ 		};
+ 
+ 		cpu2: cpu@200 {
++			capacity-dmips-mhz = <1792>;
+ 			device_type = "cpu";
+ 			compatible = "qcom,oryon";
+ 			reg = <0x0 0x200>;
+ 			enable-method = "psci";
+-			capacity-dmips-mhz = <1792>;
+ 			next-level-cache = <&l2_0>;
+ 			power-domains = <&cpu_pd2>, <&scmi_dvfs 0>;
+ 			power-domain-names = "psci", "perf";
+@@ -81,11 +106,11 @@
+ 		};
+ 
+ 		cpu3: cpu@300 {
++			capacity-dmips-mhz = <1792>;
+ 			device_type = "cpu";
+ 			compatible = "qcom,oryon";
+ 			reg = <0x0 0x300>;
+ 			enable-method = "psci";
+-			capacity-dmips-mhz = <1792>;
+ 			next-level-cache = <&l2_0>;
+ 			power-domains = <&cpu_pd3>, <&scmi_dvfs 0>;
+ 			power-domain-names = "psci", "perf";
+@@ -93,11 +118,11 @@
+ 		};
+ 
+ 		cpu4: cpu@400 {
++			capacity-dmips-mhz = <1792>;
+ 			device_type = "cpu";
+ 			compatible = "qcom,oryon";
+ 			reg = <0x0 0x400>;
+ 			enable-method = "psci";
+-			capacity-dmips-mhz = <1792>;
+ 			next-level-cache = <&l2_0>;
+ 			power-domains = <&cpu_pd4>, <&scmi_dvfs 0>;
+ 			power-domain-names = "psci", "perf";
+@@ -105,11 +130,11 @@
+ 		};
+ 
+ 		cpu5: cpu@500 {
++			capacity-dmips-mhz = <1792>;
+ 			device_type = "cpu";
+ 			compatible = "qcom,oryon";
+ 			reg = <0x0 0x500>;
+ 			enable-method = "psci";
+-			capacity-dmips-mhz = <1792>;
+ 			next-level-cache = <&l2_0>;
+ 			power-domains = <&cpu_pd5>, <&scmi_dvfs 0>;
+ 			power-domain-names = "psci", "perf";
+@@ -117,11 +142,11 @@
+ 		};
+ 
+ 		cpu6: cpu@10000 {
++			capacity-dmips-mhz = <1894>;
+ 			device_type = "cpu";
+ 			compatible = "qcom,oryon";
+ 			reg = <0x0 0x10000>;
+ 			enable-method = "psci";
+-			capacity-dmips-mhz = <1894>;
+ 			next-level-cache = <&l2_1>;
+ 			power-domains = <&cpu_pd6>, <&scmi_dvfs 1>;
+ 			power-domain-names = "psci", "perf";
+@@ -135,11 +160,11 @@
+ 		};
+ 
+ 		cpu7: cpu@10100 {
++			capacity-dmips-mhz = <1894>;
+ 			device_type = "cpu";
+ 			compatible = "qcom,oryon";
+ 			reg = <0x0 0x10100>;
+ 			enable-method = "psci";
+-			capacity-dmips-mhz = <1894>;
+ 			next-level-cache = <&l2_1>;
+ 			power-domains = <&cpu_pd7>, <&scmi_dvfs 1>;
+ 			power-domain-names = "psci", "perf";
+@@ -692,6 +717,13 @@
+ 		};
+ 	};
+ 
++	/*
++	 * The bootloader leaves an early SoCCP image running in D0 with no bus
++	 * vote of its own. The driver holds the SoCCP's path to DDR from probe
++	 * until the image it loads has parked itself in D3, as read from the
++	 * TCSR D-state register. Enabled for every board: without the firmware
++	 * the vote is simply kept, which is what lets the SoC wake from s2idle.
++	 */
+ 	remoteproc_soccp: remoteproc-soccp {
+ 		compatible = "qcom,sm8750-soccp-pas";
+ 
+@@ -838,6 +870,28 @@
+ 				status = "disabled";
+ 			};
+ 
++			uart_kb: serial@880000 {
++				compatible = "qcom,geni-uart";
++				reg = <0x0 0x00880000 0x0 0x4000>;
++
++				interrupts = <GIC_SPI 373 IRQ_TYPE_LEVEL_HIGH>;
++
++				clocks = <&gcc GCC_QUPV3_WRAP2_S0_CLK>;
++				clock-names = "se";
++
++				interconnects = <&clk_virt MASTER_QUP_CORE_2 QCOM_ICC_TAG_ALWAYS
++						 &clk_virt SLAVE_QUP_CORE_2 QCOM_ICC_TAG_ALWAYS>,
++						<&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ALWAYS
++						 &config_noc SLAVE_QUP_2 QCOM_ICC_TAG_ALWAYS>;
++				interconnect-names = "qup-core",
++						     "qup-config";
++
++				pinctrl-0 = <&qup_uart_kb_default>;
++				pinctrl-names = "default";
++
++				status = "disabled";
++			};
++
+ 			spi8: spi@880000 {
+ 				compatible = "qcom,geni-spi";
+ 				reg = <0x0 0x00880000 0x0 0x4000>;
+@@ -2184,7 +2238,8 @@
+ 				<&bi_tcxo_ao_div2>,
+ 				<&sleep_clk>;
+ 			power-domains = <&rpmhpd RPMHPD_MMCX>,
+-					<&rpmhpd RPMHPD_MX>;
++					<&rpmhpd RPMHPD_MX>,
++					<&camcc CAM_CC_TITAN_TOP_GDSC>;
+ 			required-opps = <&rpmhpd_opp_low_svs>,
+ 					<&rpmhpd_opp_low_svs>;
+ 
+@@ -3132,6 +3187,525 @@
+ 			#clock-cells = <1>;
+ 			#reset-cells = <1>;
+ 			#power-domain-cells = <1>;
++		};
++
++		cci0: cci@ac7b000 {
++			compatible = "qcom,sm8750-cci", "qcom,msm8996-cci";
++			reg = <0x0 0x0ac7b000 0x0 0x1000>;
++			interrupts = <GIC_SPI 426 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>;
++			clocks = <&camcc CAM_CC_CAM_TOP_AHB_CLK>,
++				 <&camcc CAM_CC_CCI_0_CLK>;
++			clock-names = "ahb", "cci";
++			pinctrl-0 = <&cci0_0_default &cci0_1_default>;
++			pinctrl-1 = <&cci0_0_sleep &cci0_1_sleep>;
++			pinctrl-names = "default", "sleep";
++			status = "disabled";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			cci0_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci0_i2c1: i2c-bus@1 {
++				reg = <1>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		cci1: cci@ac7c000 {
++			compatible = "qcom,sm8750-cci", "qcom,msm8996-cci";
++			reg = <0x0 0x0ac7c000 0x0 0x1000>;
++			interrupts = <GIC_SPI 427 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>;
++			clocks = <&camcc CAM_CC_CAM_TOP_AHB_CLK>,
++				 <&camcc CAM_CC_CCI_1_CLK>;
++			clock-names = "ahb", "cci";
++			pinctrl-0 = <&cci1_0_default &cci1_1_default>;
++			pinctrl-1 = <&cci1_0_sleep &cci1_1_sleep>;
++			pinctrl-names = "default", "sleep";
++			status = "disabled";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			cci1_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci1_i2c1: i2c-bus@1 {
++				reg = <1>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		cci2: cci@ac7d000 {
++			compatible = "qcom,sm8750-cci", "qcom,msm8996-cci";
++			reg = <0x0 0x0ac7d000 0x0 0x1000>;
++			interrupts = <GIC_SPI 428 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>;
++			clocks = <&camcc CAM_CC_CAM_TOP_AHB_CLK>,
++				 <&camcc CAM_CC_CCI_2_CLK>;
++			clock-names = "ahb", "cci";
++			pinctrl-0 = <&cci2_0_default &cci2_1_default>;
++			pinctrl-1 = <&cci2_0_sleep &cci2_1_sleep>;
++			pinctrl-names = "default", "sleep";
++			status = "disabled";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			cci2_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci2_i2c1: i2c-bus@1 {
++				reg = <1>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		camss: isp@ad27000 {
++			compatible = "qcom,sm8750-camss";
++
++			reg = <0x0 0x0ad27000 0x0 0x2b00>,
++			      <0x0 0x0ad2a000 0x0 0x2b00>,
++			      <0x0 0x0ad2d000 0x0 0x2b00>,
++			      <0x0 0x0ad6d000 0x0 0xa00>,
++			      <0x0 0x0ad72000 0x0 0xa00>,
++			      <0x0 0x0ad8b000 0x0 0x400>,
++			      <0x0 0x0ad8c000 0x0 0x400>,
++			      <0x0 0x0ad8d000 0x0 0x400>,
++			      <0x0 0x0ac86000 0x0 0x10000>,
++			      <0x0 0x0ac96000 0x0 0x10000>,
++			      <0x0 0x0aca6000 0x0 0x10000>,
++			      <0x0 0x0ad6e000 0x0 0x3000>,
++			      <0x0 0x0ad73000 0x0 0x3000>;
++			reg-names = "csid0",
++				    "csid1",
++				    "csid2",
++				    "csid_lite0",
++				    "csid_lite1",
++				    "csitpg0",
++				    "csitpg1",
++				    "csitpg2",
++				    "vfe0",
++				    "vfe1",
++				    "vfe2",
++				    "vfe_lite0",
++				    "vfe_lite1";
++
++			clocks = <&camcc CAM_CC_CAMNOC_NRT_AXI_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_AXI_CLK>,
++				 <&camcc CAM_CC_CAM_TOP_AHB_CLK>,
++				 <&camcc CAM_CC_CAM_TOP_FAST_AHB_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_TFE_0_MAIN_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_TFE_1_MAIN_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_TFE_2_MAIN_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_IFE_LITE_CLK>,
++				 <&camcc CAM_CC_CSID_CLK>,
++				 <&camcc CAM_CC_CSID_CSIPHY_RX_CLK>,
++				 <&gcc GCC_CAMERA_HF_AXI_CLK>,
++				 <&gcc GCC_CAMERA_SF_AXI_CLK>,
++				 <&camcc CAM_CC_TFE_0_MAIN_CLK>,
++				 <&camcc CAM_CC_TFE_0_MAIN_FAST_AHB_CLK>,
++				 <&camcc CAM_CC_TFE_1_MAIN_CLK>,
++				 <&camcc CAM_CC_TFE_1_MAIN_FAST_AHB_CLK>,
++				 <&camcc CAM_CC_TFE_2_MAIN_CLK>,
++				 <&camcc CAM_CC_TFE_2_MAIN_FAST_AHB_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_AHB_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_CPHY_RX_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_CSID_CLK>,
++				 <&camcc CAM_CC_QDSS_DEBUG_XO_CLK>;
++			clock-names = "camnoc_nrt_axi",
++				      "camnoc_rt_axi",
++				      "cpas_ahb",
++				      "cpas_fast_ahb",
++				      "cpas_vfe0",
++				      "cpas_vfe1",
++				      "cpas_vfe2",
++				      "cpas_vfe_lite",
++				      "csid",
++				      "csid_csiphy_rx",
++				      "gcc_axi_hf",
++				      "gcc_axi_sf",
++				      "vfe0",
++				      "vfe0_fast_ahb",
++				      "vfe1",
++				      "vfe1_fast_ahb",
++				      "vfe2",
++				      "vfe2_fast_ahb",
++				      "vfe_lite",
++				      "vfe_lite_ahb",
++				      "vfe_lite_cphy_rx",
++				      "vfe_lite_csid",
++				      "qdss_debug_xo";
++
++			interrupts = <GIC_SPI 601 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 603 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 431 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 605 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 376 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 433 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 436 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 457 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 606 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 377 IRQ_TYPE_EDGE_RISING>;
++			interrupt-names = "csid0",
++					  "csid1",
++					  "csid2",
++					  "csid_lite0",
++					  "csid_lite1",
++					  "vfe0",
++					  "vfe1",
++					  "vfe2",
++					  "vfe_lite0",
++					  "vfe_lite1";
++
++			interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
++					 &config_noc SLAVE_CAMERA_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
++					<&mmss_noc MASTER_CAMNOC_HF QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
++					<&mmss_noc MASTER_CAMNOC_SF QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
++					<&mmss_noc MASTER_CAMNOC_NRT_ICP_SF QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
++			interconnect-names = "ahb",
++					     "hf_mnoc",
++					     "sf_mnoc",
++					     "sf_icp_mnoc";
++
++			iommus = <&apps_smmu 0x1c00 0x00>;
++
++			power-domains = <&camcc CAM_CC_TFE_0_GDSC>,
++					<&camcc CAM_CC_TFE_1_GDSC>,
++					<&camcc CAM_CC_TFE_2_GDSC>,
++					<&camcc CAM_CC_TITAN_TOP_GDSC>,
++					<&rpmhpd RPMHPD_MMCX>,
++					<&rpmhpd RPMHPD_MX>,
++					<&rpmhpd RPMHPD_MXC>;
++			power-domain-names = "ife0",
++					     "ife1",
++					     "ife2",
++					     "top",
++					     "mmcx",
++					     "mx",
++					     "mxc";
++			/* Cover all supported VFE/CSID rates while CAMSS is active. */
++			required-opps = <0>, <0>, <0>, <0>,
++					<&rpmhpd_opp_nom>,
++					<&rpmhpd_opp_svs>,
++					<&rpmhpd_opp_nom>;
++
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++
++					camss_csiphy0_in: endpoint {
++						remote-endpoint = <&csiphy0_out>;
++					};
++				};
++
++				port@1 {
++					reg = <1>;
++
++					camss_csiphy1_in: endpoint {
++						remote-endpoint = <&csiphy1_out>;
++					};
++				};
++
++				port@2 {
++					reg = <2>;
++
++					camss_csiphy2_in: endpoint {
++						remote-endpoint = <&csiphy2_out>;
++					};
++				};
++
++				port@3 {
++					reg = <3>;
++
++					camss_csiphy3_in: endpoint {
++						remote-endpoint = <&csiphy3_out>;
++					};
++				};
++
++				port@4 {
++					reg = <4>;
++
++					camss_csiphy4_in: endpoint {
++						remote-endpoint = <&csiphy4_out>;
++					};
++				};
++
++				port@5 {
++					reg = <5>;
++
++					camss_csiphy5_in: endpoint {
++						remote-endpoint = <&csiphy5_out>;
++					};
++				};
++			};
++		};
++
++		csiphy0: phy@ada9000 {
++			compatible = "qcom,sm8750-csi2-phy";
++			reg = <0x0 0x0ada9000 0x0 0x2000>;
++			interrupts = <GIC_SPI 477 IRQ_TYPE_EDGE_RISING>;
++
++			clocks = <&camcc CAM_CC_CSIPHY0_CLK>,
++				 <&camcc CAM_CC_CSI0PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CORE_AHB_CLK>;
++			clock-names = "core", "timer", "ahb";
++			operating-points-v2 = <&csiphy_opp_table>;
++
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>,
++					<&rpmhpd RPMHPD_MMCX>,
++					<&rpmhpd RPMHPD_MX>,
++					<&rpmhpd RPMHPD_MXC>;
++			power-domain-names = "top", "mmcx", "mx", "mxc";
++
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++
++					csiphy0_in: endpoint {
++					};
++				};
++
++				port@1 {
++					reg = <1>;
++
++					csiphy0_out: endpoint {
++						remote-endpoint = <&camss_csiphy0_in>;
++					};
++				};
++			};
++		};
++
++		csiphy1: phy@adab000 {
++			compatible = "qcom,sm8750-csi2-phy";
++			reg = <0x0 0x0adab000 0x0 0x2000>;
++			interrupts = <GIC_SPI 478 IRQ_TYPE_EDGE_RISING>;
++
++			clocks = <&camcc CAM_CC_CSIPHY1_CLK>,
++				 <&camcc CAM_CC_CSI1PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CORE_AHB_CLK>;
++			clock-names = "core", "timer", "ahb";
++			operating-points-v2 = <&csiphy_opp_table>;
++
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>,
++					<&rpmhpd RPMHPD_MMCX>,
++					<&rpmhpd RPMHPD_MX>,
++					<&rpmhpd RPMHPD_MXC>;
++			power-domain-names = "top", "mmcx", "mx", "mxc";
++
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++
++					csiphy1_in: endpoint {
++					};
++				};
++
++				port@1 {
++					reg = <1>;
++
++					csiphy1_out: endpoint {
++						remote-endpoint = <&camss_csiphy1_in>;
++					};
++				};
++			};
++		};
++
++		csiphy2: phy@adad000 {
++			compatible = "qcom,sm8750-csi2-phy";
++			reg = <0x0 0x0adad000 0x0 0x2000>;
++			interrupts = <GIC_SPI 479 IRQ_TYPE_EDGE_RISING>;
++
++			clocks = <&camcc CAM_CC_CSIPHY2_CLK>,
++				 <&camcc CAM_CC_CSI2PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CORE_AHB_CLK>;
++			clock-names = "core", "timer", "ahb";
++			operating-points-v2 = <&csiphy_opp_table>;
++
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>,
++					<&rpmhpd RPMHPD_MMCX>,
++					<&rpmhpd RPMHPD_MX>,
++					<&rpmhpd RPMHPD_MXC>;
++			power-domain-names = "top", "mmcx", "mx", "mxc";
++
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++
++					csiphy2_in: endpoint {
++					};
++				};
++
++				port@1 {
++					reg = <1>;
++
++					csiphy2_out: endpoint {
++						remote-endpoint = <&camss_csiphy2_in>;
++					};
++				};
++			};
++		};
++
++		csiphy3: phy@adaf000 {
++			compatible = "qcom,sm8750-csi2-phy";
++			reg = <0x0 0x0adaf000 0x0 0x2000>;
++			interrupts = <GIC_SPI 448 IRQ_TYPE_EDGE_RISING>;
++
++			clocks = <&camcc CAM_CC_CSIPHY3_CLK>,
++				 <&camcc CAM_CC_CSI3PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CORE_AHB_CLK>;
++			clock-names = "core", "timer", "ahb";
++			operating-points-v2 = <&csiphy_opp_table>;
++
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>,
++					<&rpmhpd RPMHPD_MMCX>,
++					<&rpmhpd RPMHPD_MX>,
++					<&rpmhpd RPMHPD_MXC>;
++			power-domain-names = "top", "mmcx", "mx", "mxc";
++
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++
++					csiphy3_in: endpoint {
++					};
++				};
++
++				port@1 {
++					reg = <1>;
++
++					csiphy3_out: endpoint {
++						remote-endpoint = <&camss_csiphy3_in>;
++					};
++				};
++			};
++		};
++
++		csiphy4: phy@adb1000 {
++			compatible = "qcom,sm8750-csi2-phy";
++			reg = <0x0 0x0adb1000 0x0 0x2000>;
++			interrupts = <GIC_SPI 122 IRQ_TYPE_EDGE_RISING>;
++
++			clocks = <&camcc CAM_CC_CSIPHY4_CLK>,
++				 <&camcc CAM_CC_CSI4PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CORE_AHB_CLK>;
++			clock-names = "core", "timer", "ahb";
++			operating-points-v2 = <&csiphy_opp_table>;
++
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>,
++					<&rpmhpd RPMHPD_MMCX>,
++					<&rpmhpd RPMHPD_MX>,
++					<&rpmhpd RPMHPD_MXC>;
++			power-domain-names = "top", "mmcx", "mx", "mxc";
++
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++
++					csiphy4_in: endpoint {
++					};
++				};
++
++				port@1 {
++					reg = <1>;
++
++					csiphy4_out: endpoint {
++						remote-endpoint = <&camss_csiphy4_in>;
++					};
++				};
++			};
++		};
++
++		csiphy5: phy@adb3000 {
++			compatible = "qcom,sm8750-csi2-phy";
++			reg = <0x0 0x0adb3000 0x0 0x2000>;
++			interrupts = <GIC_SPI 89 IRQ_TYPE_EDGE_RISING>;
++
++			clocks = <&camcc CAM_CC_CSIPHY5_CLK>,
++				 <&camcc CAM_CC_CSI5PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CORE_AHB_CLK>;
++			clock-names = "core", "timer", "ahb";
++			operating-points-v2 = <&csiphy_opp_table>;
++
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>,
++					<&rpmhpd RPMHPD_MMCX>,
++					<&rpmhpd RPMHPD_MX>,
++					<&rpmhpd RPMHPD_MXC>;
++			power-domain-names = "top", "mmcx", "mx", "mxc";
++
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++
++					csiphy5_in: endpoint {
++					};
++				};
++
++				port@1 {
++					reg = <1>;
++
++					csiphy5_out: endpoint {
++						remote-endpoint = <&camss_csiphy5_in>;
++					};
++				};
++			};
+ 		};
+ 
+ 		mdss: display-subsystem@ae00000 {
+@@ -3714,6 +4288,17 @@
+ 			};
+ 		};
+ 
++		gxclkctl: clock-controller@3d64000 {
++			compatible = "qcom,sm8750-gxclkctl";
++			reg = <0x0 0x03d64000 0x0 0x6000>;
++
++			power-domains = <&rpmhpd RPMHPD_GFX>,
++					<&rpmhpd RPMHPD_GMXC>,
++					<&gpucc GPU_CC_CX_GDSC>;
++
++			#power-domain-cells = <1>;
++		};
++
+ 		gmu: gmu@3d37000 {
+ 			compatible = "qcom,adreno-gmu-830.1", "qcom,adreno-gmu";
+ 
+@@ -3764,17 +4349,6 @@
+ 					opp-level = <RPMH_REGULATOR_LEVEL_NOM>;
+ 				};
+ 			};
+-		};
+-
+-		gxclkctl: clock-controller@3d64000 {
+-			compatible = "qcom,sm8750-gxclkctl";
+-			reg = <0x0 0x03d64000 0x0 0x6000>;
+-
+-			power-domains = <&rpmhpd RPMHPD_GFX>,
+-					<&rpmhpd RPMHPD_GMXC>,
+-					<&gpucc GPU_CC_CX_GDSC>;
+-
+-			#power-domain-cells = <1>;
+ 		};
+ 
+ 		gpucc: clock-controller@3d90000 {
+@@ -3915,6 +4489,254 @@
+ 			gpio-ranges = <&tlmm 0 0 216>;
+ 			wakeup-parent = <&pdc>;
+ 
++			cam0_default: cam0-default-state {
++				pins = "gpio89";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam1_default: cam1-default-state {
++				pins = "gpio90";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam2_default: cam2-default-state {
++				pins = "gpio91";
++				function = "cam_aon_mclk2";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam3_default: cam3-default-state {
++				pins = "gpio92";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam4_default: cam4-default-state {
++				pins = "gpio93";
++				function = "cam_aon_mclk4";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam5_default: cam5-default-state {
++				pins = "gpio94";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam6_default: cam6-default-state {
++				pins = "gpio95";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cam7_default: cam7-default-state {
++				pins = "gpio96";
++				function = "cam_mclk";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
++			cci0_0_default: cci0-0-default-state {
++				sda-pins {
++					pins = "gpio113";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++
++				scl-pins {
++					pins = "gpio114";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++			};
++
++			cci0_0_sleep: cci0-0-sleep-state {
++				sda-pins {
++					pins = "gpio113";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++
++				scl-pins {
++					pins = "gpio114";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++			};
++
++			cci0_1_default: cci0-1-default-state {
++				sda-pins {
++					pins = "gpio115";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++
++				scl-pins {
++					pins = "gpio116";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++			};
++
++			cci0_1_sleep: cci0-1-sleep-state {
++				sda-pins {
++					pins = "gpio115";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++
++				scl-pins {
++					pins = "gpio116";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++			};
++
++			cci1_0_default: cci1-0-default-state {
++				sda-pins {
++					pins = "gpio117";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++
++				scl-pins {
++					pins = "gpio118";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++			};
++
++			cci1_0_sleep: cci1-0-sleep-state {
++				sda-pins {
++					pins = "gpio117";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++
++				scl-pins {
++					pins = "gpio118";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++			};
++
++			cci1_1_default: cci1-1-default-state {
++				sda-pins {
++					pins = "gpio111";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++
++				scl-pins {
++					pins = "gpio164";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++			};
++
++			cci1_1_sleep: cci1-1-sleep-state {
++				sda-pins {
++					pins = "gpio111";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++
++				scl-pins {
++					pins = "gpio164";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++			};
++
++			cci2_0_default: cci2-0-default-state {
++				sda-pins {
++					pins = "gpio112";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++
++				scl-pins {
++					pins = "gpio153";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++			};
++
++			cci2_0_sleep: cci2-0-sleep-state {
++				sda-pins {
++					pins = "gpio112";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++
++				scl-pins {
++					pins = "gpio153";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++			};
++
++			cci2_1_default: cci2-1-default-state {
++				sda-pins {
++					pins = "gpio119";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++
++				scl-pins {
++					pins = "gpio120";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++			};
++
++			cci2_1_sleep: cci2-1-sleep-state {
++				sda-pins {
++					pins = "gpio119";
++					function = "cci_i2c_sda";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++
++				scl-pins {
++					pins = "gpio120";
++					function = "cci_i2c_scl";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++			};
++
+ 			hub_i2c0_data_clk: hub-i2c0-data-clk-state {
+ 				/* SDA, SCL */
+ 				pins = "gpio64", "gpio65";
+@@ -4368,6 +5190,13 @@
+ 				/* TX, RX */
+ 				pins = "gpio30", "gpio31";
+ 				function = "qup2_se7";
++			drive-strength = <2>;
++			bias-pull-up;
++		};
++
++			qup_uart_kb_default: qup-uart-kb-default-state {
++				pins = "gpio2", "gpio3";
++				function = "qup2_se0";
+ 				drive-strength = <2>;
+ 				bias-pull-up;
+ 			};
+@@ -5635,8 +6464,8 @@
+ 			interconnect-names = "pcie-mem",
+ 					     "cpu-pcie";
+ 
+-			iommu-map = <0x0   &apps_smmu 0x1400 0x0 0x1>,
+-				    <0x100 &apps_smmu 0x1401 0x0 0x1>;
++			iommu-map = <0x0   &apps_smmu 0x1400 0x1>,
++				    <0x100 &apps_smmu 0x1401 0x1>;
+ 
+ 			resets = <&gcc GCC_PCIE_0_BCR>;
+ 			reset-names = "pci";
+@@ -5755,7 +6584,10 @@
+ 
+ 		ufs_mem_hc: ufs@1d84000 {
+ 			compatible = "qcom,sm8750-ufshc", "qcom,ufshc", "jedec,ufs-2.0";
+-			reg = <0x0 0x01d84000 0x0 0x3000>;
++			reg = <0x0 0x01d84000 0x0 0x3000>,
++			      <0x0 0x01da0000 0x0 0x7000>;
++			reg-names = "std",
++				    "mcq";
+ 
+ 			interrupts = <GIC_SPI 265 IRQ_TYPE_LEVEL_HIGH>;
+ 
+@@ -5793,6 +6625,7 @@
+ 
+ 			iommus = <&apps_smmu 0x60 0>;
+ 			dma-coherent;
++			msi-parent = <&gic_its 0x60>;
+ 
+ 			lanes-per-direction = <2>;
+ 
+@@ -6067,6 +6900,18 @@
+ 			cpu_scp_lpri1: scp-sram-section@200 {
+ 				compatible = "arm,scmi-shmem";
+ 				reg = <0x200 0x200>;
++			};
++		};
++
++		qfprom: efuse@221c8000 {
++			compatible = "qcom,sm8750-qfprom", "qcom,qfprom";
++			reg = <0x0 0x221c8000 0x0 0x1000>;
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			gpu_speed_bin: gpu-speed-bin@138 {
++				reg = <0x138 0x2>;
++				bits = <0 9>;
+ 			};
+ 		};
+ 
+@@ -7310,10 +8155,10 @@
+ 			thermal-sensors = <&tsens2 1>;
+ 
+ 			trips {
+-				trip-point0 {
+-					temperature = <120000>;
++				gpuss0_alert0: gpuss0-alert0 {
++					temperature = <105000>;
+ 					hysteresis = <5000>;
+-					type = "hot";
++					type = "passive";
+ 				};
+ 
+ 				gpuss0-critical {
+@@ -7322,10 +8167,192 @@
+ 					type = "critical";
+ 				};
+ 			};
++
++			cooling-maps {
++				map0 {
++					trip = <&gpuss0_alert0>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
+ 		};
+ 
+ 		gpuss1-thermal {
+ 			thermal-sensors = <&tsens2 2>;
++
++			trips {
++				gpuss1_alert0: gpuss1-alert0 {
++					temperature = <105000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				gpuss1-critical {
++					temperature = <125000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&gpuss1_alert0>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		gpuss2-thermal {
++			thermal-sensors = <&tsens2 3>;
++
++			trips {
++				gpuss2_alert0: gpuss2-alert0 {
++					temperature = <105000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				gpuss2-critical {
++					temperature = <125000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&gpuss2_alert0>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		gpuss3-thermal {
++			thermal-sensors = <&tsens2 4>;
++
++			trips {
++				gpuss3_alert0: gpuss3-alert0 {
++					temperature = <105000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				gpuss3-critical {
++					temperature = <125000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&gpuss3_alert0>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		gpuss4-thermal {
++			thermal-sensors = <&tsens2 5>;
++
++			trips {
++				gpuss4_alert0: gpuss4-alert0 {
++					temperature = <105000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				gpuss4-critical {
++					temperature = <125000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&gpuss4_alert0>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		gpuss5-thermal {
++			thermal-sensors = <&tsens2 6>;
++
++			trips {
++				gpuss5_alert0: gpuss5-alert0 {
++					temperature = <105000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				gpuss5-critical {
++					temperature = <125000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&gpuss5_alert0>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		gpuss6-thermal {
++			thermal-sensors = <&tsens2 7>;
++
++			trips {
++				gpuss6_alert0: gpuss6-alert0 {
++					temperature = <105000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				gpuss6-critical {
++					temperature = <125000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&gpuss6_alert0>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		gpuss7-thermal {
++			thermal-sensors = <&tsens2 8>;
++
++			trips {
++				gpuss7_alert0: gpuss7-alert0 {
++					temperature = <105000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				gpuss7-critical {
++					temperature = <125000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&gpuss7_alert0>;
++					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++
++		modem0-thermal {
++			thermal-sensors = <&tsens2 9>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7334,7 +8361,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				gpuss1-critical {
++				modem0-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7342,8 +8369,8 @@
+ 			};
+ 		};
+ 
+-		gpuss2-thermal {
+-			thermal-sensors = <&tsens2 3>;
++		modem1-thermal {
++			thermal-sensors = <&tsens2 10>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7352,7 +8379,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				gpuss2-critical {
++				modem1-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7360,8 +8387,8 @@
+ 			};
+ 		};
+ 
+-		gpuss3-thermal {
+-			thermal-sensors = <&tsens2 4>;
++		modem2-thermal {
++			thermal-sensors = <&tsens2 11>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7370,7 +8397,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				gpuss3-critical {
++				modem2-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7378,8 +8405,8 @@
+ 			};
+ 		};
+ 
+-		gpuss4-thermal {
+-			thermal-sensors = <&tsens2 5>;
++		modem3-thermal {
++			thermal-sensors = <&tsens2 12>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7388,7 +8415,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				gpuss4-critical {
++				modem3-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7396,8 +8423,8 @@
+ 			};
+ 		};
+ 
+-		gpuss5-thermal {
+-			thermal-sensors = <&tsens2 6>;
++		camera0-thermal {
++			thermal-sensors = <&tsens2 13>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7406,7 +8433,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				gpuss5-critical {
++				camera0-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7414,8 +8441,8 @@
+ 			};
+ 		};
+ 
+-		gpuss6-thermal {
+-			thermal-sensors = <&tsens2 7>;
++		camera1-thermal {
++			thermal-sensors = <&tsens2 14>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7424,7 +8451,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				gpuss6-critical {
++				camera1-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7432,8 +8459,8 @@
+ 			};
+ 		};
+ 
+-		gpuss7-thermal {
+-			thermal-sensors = <&tsens2 8>;
++		video-thermal {
++			thermal-sensors = <&tsens2 15>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7442,7 +8469,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				gpuss7-critical {
++				video-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7450,8 +8477,8 @@
+ 			};
+ 		};
+ 
+-		modem0-thermal {
+-			thermal-sensors = <&tsens2 9>;
++		aoss3-thermal {
++			thermal-sensors = <&tsens3 0>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7460,7 +8487,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				modem0-critical {
++				aoss3-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7468,8 +8495,8 @@
+ 			};
+ 		};
+ 
+-		modem1-thermal {
+-			thermal-sensors = <&tsens2 10>;
++		nsphvx0-thermal {
++			thermal-sensors = <&tsens3 1>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7478,7 +8505,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				modem1-critical {
++				nsphvx0-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7486,8 +8513,8 @@
+ 			};
+ 		};
+ 
+-		modem2-thermal {
+-			thermal-sensors = <&tsens2 11>;
++		nsphvx1-thermal {
++			thermal-sensors = <&tsens3 2>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7496,7 +8523,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				modem2-critical {
++				nsphvx1-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7504,8 +8531,8 @@
+ 			};
+ 		};
+ 
+-		modem3-thermal {
+-			thermal-sensors = <&tsens2 12>;
++		nsphvx2-thermal {
++			thermal-sensors = <&tsens3 3>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7514,7 +8541,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				modem3-critical {
++				nsphvx2-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7522,8 +8549,8 @@
+ 			};
+ 		};
+ 
+-		camera0-thermal {
+-			thermal-sensors = <&tsens2 13>;
++		nsphmx0-thermal {
++			thermal-sensors = <&tsens3 4>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7532,7 +8559,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				camera0-critical {
++				nsphmx0-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7540,8 +8567,8 @@
+ 			};
+ 		};
+ 
+-		camera1-thermal {
+-			thermal-sensors = <&tsens2 14>;
++		nsphmx1-thermal {
++			thermal-sensors = <&tsens3 5>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7550,7 +8577,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				camera1-critical {
++				nsphmx1-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7558,8 +8585,8 @@
+ 			};
+ 		};
+ 
+-		video-thermal {
+-			thermal-sensors = <&tsens2 15>;
++		nsphmx2-thermal {
++			thermal-sensors = <&tsens3 6>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7568,7 +8595,7 @@
+ 					type = "hot";
+ 				};
+ 
+-				video-critical {
++				nsphmx2-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+@@ -7576,8 +8603,8 @@
+ 			};
+ 		};
+ 
+-		aoss3-thermal {
+-			thermal-sensors = <&tsens3 0>;
++		nsphmx3-thermal {
++			thermal-sensors = <&tsens3 7>;
+ 
+ 			trips {
+ 				trip-point0 {
+@@ -7586,132 +8613,6 @@
+ 					type = "hot";
+ 				};
+ 
+-				aoss3-critical {
+-					temperature = <125000>;
+-					hysteresis = <0>;
+-					type = "critical";
+-				};
+-			};
+-		};
+-
+-		nsphvx0-thermal {
+-			thermal-sensors = <&tsens3 1>;
+-
+-			trips {
+-				trip-point0 {
+-					temperature = <120000>;
+-					hysteresis = <5000>;
+-					type = "hot";
+-				};
+-
+-				nsphvx0-critical {
+-					temperature = <125000>;
+-					hysteresis = <0>;
+-					type = "critical";
+-				};
+-			};
+-		};
+-
+-		nsphvx1-thermal {
+-			thermal-sensors = <&tsens3 2>;
+-
+-			trips {
+-				trip-point0 {
+-					temperature = <120000>;
+-					hysteresis = <5000>;
+-					type = "hot";
+-				};
+-
+-				nsphvx1-critical {
+-					temperature = <125000>;
+-					hysteresis = <0>;
+-					type = "critical";
+-				};
+-			};
+-		};
+-
+-		nsphvx2-thermal {
+-			thermal-sensors = <&tsens3 3>;
+-
+-			trips {
+-				trip-point0 {
+-					temperature = <120000>;
+-					hysteresis = <5000>;
+-					type = "hot";
+-				};
+-
+-				nsphvx2-critical {
+-					temperature = <125000>;
+-					hysteresis = <0>;
+-					type = "critical";
+-				};
+-			};
+-		};
+-
+-		nsphmx0-thermal {
+-			thermal-sensors = <&tsens3 4>;
+-
+-			trips {
+-				trip-point0 {
+-					temperature = <120000>;
+-					hysteresis = <5000>;
+-					type = "hot";
+-				};
+-
+-				nsphmx0-critical {
+-					temperature = <125000>;
+-					hysteresis = <0>;
+-					type = "critical";
+-				};
+-			};
+-		};
+-
+-		nsphmx1-thermal {
+-			thermal-sensors = <&tsens3 5>;
+-
+-			trips {
+-				trip-point0 {
+-					temperature = <120000>;
+-					hysteresis = <5000>;
+-					type = "hot";
+-				};
+-
+-				nsphmx1-critical {
+-					temperature = <125000>;
+-					hysteresis = <0>;
+-					type = "critical";
+-				};
+-			};
+-		};
+-
+-		nsphmx2-thermal {
+-			thermal-sensors = <&tsens3 6>;
+-
+-			trips {
+-				trip-point0 {
+-					temperature = <120000>;
+-					hysteresis = <5000>;
+-					type = "hot";
+-				};
+-
+-				nsphmx2-critical {
+-					temperature = <125000>;
+-					hysteresis = <0>;
+-					type = "critical";
+-				};
+-			};
+-		};
+-
+-		nsphmx3-thermal {
+-			thermal-sensors = <&tsens3 7>;
+-
+-			trips {
+-				trip-point0 {
+-					temperature = <120000>;
+-					hysteresis = <5000>;
+-					type = "hot";
+-				};
+-
+ 				nsphmx3-critical {
+ 					temperature = <125000>;
+ 					hysteresis = <0>;
+diff --git a/include/dt-bindings/sound/qcom,q6dsp-lpass-ports.h b/include/dt-bindings/sound/qcom,q6dsp-lpass-ports.h
+--- a/include/dt-bindings/sound/qcom,q6dsp-lpass-ports.h
++++ b/include/dt-bindings/sound/qcom,q6dsp-lpass-ports.h
+@@ -233,6 +233,35 @@
+ /* Clock ID for RX CORE MCLK2 2X  MCLK */
+ #define LPASS_CLK_ID_RX_CORE_MCLK2_2X_MCLK	70
+ 
++#define LAPSS_CLK_ID_QAIF_IF0_IBIT		71
++#define LAPSS_CLK_ID_QAIF_IF0_EBIT		72
++#define LAPSS_CLK_ID_QAIF_IF1_IBIT		73
++#define LAPSS_CLK_ID_QAIF_IF1_EBIT		74
++#define LAPSS_CLK_ID_QAIF_IF2_IBIT		75
++#define LAPSS_CLK_ID_QAIF_IF2_EBIT		76
++#define LAPSS_CLK_ID_QAIF_IF3_IBIT		77
++#define LAPSS_CLK_ID_QAIF_IF3_EBIT		78
++#define LAPSS_CLK_ID_QAIF_IF4_IBIT		79
++#define LAPSS_CLK_ID_QAIF_IF4_EBIT		80
++#define LAPSS_CLK_ID_QAIF_IF5_IBIT		81
++#define LAPSS_CLK_ID_QAIF_IF5_EBIT		82
++#define LAPSS_CLK_ID_QAIF_IF6_IBIT		83
++#define LAPSS_CLK_ID_QAIF_IF6_EBIT		84
++#define LAPSS_CLK_ID_QAIF_IF7_IBIT		85
++#define LAPSS_CLK_ID_QAIF_IF7_EBIT		86
++#define LAPSS_CLK_ID_QAIF_IF8_IBIT		87
++#define LAPSS_CLK_ID_QAIF_IF8_EBIT		88
++#define LAPSS_CLK_ID_QAIF_IF9_IBIT		89
++#define LAPSS_CLK_ID_QAIF_IF9_EBIT		90
++#define LAPSS_CLK_ID_QAIF_IF10_IBIT	91
++#define LAPSS_CLK_ID_QAIF_IF10_EBIT	92
++#define LAPSS_CLK_ID_QAIF_IF11_IBIT	93
++#define LAPSS_CLK_ID_QAIF_IF11_EBIT	94
++#define LAPSS_CLK_ID_QAIF_IF12_IBIT	95
++#define LAPSS_CLK_ID_QAIF_IF12_EBIT	96
++#define LAPSS_CLK_ID_VA_QAIF_IF0_IBIT	97
++#define LAPSS_CLK_ID_VA_QAIF_IF0_EBIT	98
++
+ #define LPASS_HW_AVTIMER_VOTE		101
+ #define LPASS_HW_MACRO_VOTE		102
+ #define LPASS_HW_DCODEC_VOTE		103
+diff --git a/Documentation/devicetree/bindings/soc/qcom/qcom,pmic-glink.yaml b/Documentation/devicetree/bindings/soc/qcom/qcom,pmic-glink.yaml
+--- a/Documentation/devicetree/bindings/soc/qcom/qcom,pmic-glink.yaml
++++ b/Documentation/devicetree/bindings/soc/qcom/qcom,pmic-glink.yaml
+@@ -51,6 +51,28 @@
+               - qcom,x1e80100-pmic-glink
+           - const: qcom,sm8550-pmic-glink
+           - const: qcom,pmic-glink
++      - description:
++          Devices whose battery manager firmware speaks the SoC protocol but
++          reports the battery current with the opposite sign (positive while
++          discharging), fills the battery power slot with a value that does
++          not follow the battery power, and assigns the charge control
++          request and threshold properties to vendor commands.
++        items:
++          - enum:
++              - oneplus,pad2pro-pmic-glink
++          - const: qcom,sm8750-pmic-glink
++          - const: qcom,sm8550-pmic-glink
++          - const: qcom,pmic-glink
++
++  charge-pumps:
++    $ref: /schemas/types.yaml#/definitions/phandle-array
++    minItems: 2
++    maxItems: 2
++    items:
++      maxItems: 1
++    description:
++      Primary and secondary charge pumps, in that order, controlled by the AP
++      for PPS charging on the OnePlus Pad 2 Pro.
+ 
+   '#address-cells':
+     const: 1
+@@ -86,6 +108,17 @@
+ 
+ required:
+   - compatible
++
++allOf:
++  - if:
++      not:
++        properties:
++          compatible:
++            contains:
++              const: oneplus,pad2pro-pmic-glink
++    then:
++      properties:
++        charge-pumps: false
+ 
+ additionalProperties: false
+ 

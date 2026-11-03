@@ -18,7 +18,8 @@ KCONFIG_OVERRIDES="${REPO_ROOT}/config/armada-kernel.config.overrides"
 
 # ---------- Host arch / cross-compile setup ----------
 HOST_ARCH=$(uname -m)
-JOBS=$(nproc)
+BUILD_CPUS=$(nproc)
+JOBS=$((BUILD_CPUS > 1 ? BUILD_CPUS - 1 : 1))
 MAKE_ARGS=(-j"${JOBS}")
 if [[ "${HOST_ARCH}" == "aarch64" ]]; then
     echo "==> Native aarch64 build (${JOBS} jobs)"
@@ -167,18 +168,17 @@ done
 # Append DTB entries to the qcom Makefile so they get built
 QCOM_MAKEFILE="${DTS_TARGET}/Makefile"
 echo "==> Adding DTB entries to qcom Makefile"
-# grep marker keeps this idempotent across FAST=1 re-runs
+# Check each board so a FAST=1 re-run also picks up newly added DTS files.
 if ! grep -q "# armada-kernel DTBs" "${QCOM_MAKEFILE}" 2>/dev/null; then
-    {
-        echo ""
-        echo "# armada-kernel DTBs"
-        for dts in "${DTS_DIR}"/*.dts; do
-            base=$(basename "${dts}" .dts)
-            echo "dtb-\$(CONFIG_ARCH_QCOM) += ${base}.dtb"
-        done
-    } >> "${QCOM_MAKEFILE}"
-    echo "  added $(ls ${DTS_DIR}/*.dts | wc -l) DTB entries"
+    echo -e '\n# armada-kernel DTBs' >> "${QCOM_MAKEFILE}"
 fi
+for dts in "${DTS_DIR}"/*.dts; do
+    base=$(basename "${dts}" .dts)
+    if ! grep -qE "(^|[[:space:]])${base}\\.dtb([[:space:]]|$)" "${QCOM_MAKEFILE}"; then
+        echo "dtb-\$(CONFIG_ARCH_QCOM) += ${base}.dtb" >> "${QCOM_MAKEFILE}"
+        echo "  added ${base}.dtb"
+    fi
+done
 
 # ---------- 4. Generate config ----------
 # defconfig + fragment via merge_config.sh. Explicit =y requests are checked
@@ -263,7 +263,7 @@ OUT_NAME="armada-kernel-${KVER}.tar.zst"
 OUT_PATH="${OUT_DIR}/${OUT_NAME}"
 echo "==> Compressing → ${OUT_PATH}"
 cd "${STAGE}"
-tar --owner=0 --group=0 -cf - lib | zstd -f -10 -T0 -o "${OUT_PATH}"
+tar --owner=0 --group=0 -cf - lib | zstd -f -10 -T"${JOBS}" -o "${OUT_PATH}"
 cd "${REPO_ROOT}"
 (
     cd "${OUT_DIR}"

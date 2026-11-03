@@ -334,3 +334,8 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 1182-arm64-dts-qcom-eliza-add-cpu-l3-scaling.patch
 1302-input-rsinput-support-retroid-pocket-duo.patch
 1303-serial-qcom-geni-allow-shorter-rx-dma-transfer.patch
+
+# OnePlus Pad 2 Pro (OPD2413): retained ABL display, input and board resources
+1400-opd2413-display-panel-and-backlight.patch
+1401-opd2413-nt36536-and-pogo-input.patch
+1402-opd2413-sm8750-board-resources.patch
