@@ -135,6 +135,87 @@ DEBUG_SHELL = r'''
 	telnetd -b 10.231.0.1:23 -l /bin/sh && say 'netroot: debug shell on 10.231.0.1:23'
 '''
 
+UFS_PROBE = r'''
+# Read-only look at the internal UFS (opd.ufsprobe; needs a DTB with the UFS
+# host and PHY enabled). Every UFS disk is made read-only as soon as it
+# appears; whole-disk BLKROSET also blocks writes to its partitions. The
+# report goes to the USB disk, then the UFS SCSI devices are deleted so the
+# booted system never sees internal storage.
+ufs_disks() {
+	for b in /sys/block/sd*; do
+		[ -e "$b/device" ] || continue
+		case "$(readlink -f "$b/device")" in *1d84000.ufs*) echo "${b##*/}" ;; esac
+	done
+}
+ufs_setro() {
+	for d in $(ufs_disks); do
+		blockdev --setro "/dev/$d" 2>/dev/null
+		for p in /sys/block/$d/$d*; do [ -e "$p/partition" ] && blockdev --setro "/dev/${p##*/}" 2>/dev/null; done
+	done
+}
+ufs_stats() {
+	for d in $(ufs_disks); do awk -v d=$d '$3 == d { print "diskstat", $3, "reads", $4, "sectors_read", $6, "writes", $8, "sectors_written", $10, "flushes", $19 }' /proc/diskstats; done
+}
+ufsprobe() {
+	say 'ufsprobe: waiting for UFS LUNs'
+	i=0; prev=-1; stable=0
+	while [ $i -lt 40 ]; do
+		ufs_setro
+		n=$(ufs_disks | wc -l)
+		if [ "$n" -gt 0 ] && [ "$n" = "$prev" ]; then
+			stable=$((stable + 1)); [ $stable -ge 5 ] && break
+		else
+			stable=0
+		fi
+		prev=$n; sleep 1; i=$((i + 1))
+	done
+	ufs_setro
+	mkdir -p /usb/opd/probes
+	k=1; while [ -e /usb/opd/probes/ufs-$k.txt ]; do k=$((k + 1)); done
+	out=/usb/opd/probes/ufs-$k.txt
+	say "ufsprobe: $(ufs_disks | wc -l) UFS disks after $i s, report opd/probes/ufs-$k.txt"
+	host=/sys/bus/platform/devices/1d84000.ufs
+	{
+		echo "ufs-probe v1"
+		echo "uptime=$(cat /proc/uptime)"
+		echo "cmdline=$(cat /proc/cmdline)"
+		echo "wait_s=$i"
+		for f in power_info/gear power_info/lane power_info/mode power_info/rate \
+			device_descriptor/specification_version device_descriptor/manufacturer_id \
+			device_descriptor/number_of_luns string_descriptors/manufacturer_name \
+			string_descriptors/product_name string_descriptors/product_revision \
+			health_descriptor/life_time_estimation_a health_descriptor/life_time_estimation_b \
+			health_descriptor/eol_info; do
+			[ -r "$host/$f" ] && echo "host.$f=$(cat "$host/$f" 2>&1)"
+		done
+		ufs_stats | sed 's/^/before /'
+		for d in $(ufs_disks); do
+			b=/sys/block/$d
+			size=$(blockdev --getsize64 /dev/$d)
+			echo "disk $d addr=$(basename "$(readlink -f $b/device)") bytes=$size sectors512=$(cat $b/size) lbs=$(cat $b/queue/logical_block_size) pbs=$(cat $b/queue/physical_block_size) ro=$(cat $b/ro) vendor=$(cat $b/device/vendor 2>/dev/null | tr -d ' ') model=$(cat $b/device/model 2>/dev/null | tr -s ' ' _) rev=$(cat $b/device/rev 2>/dev/null)"
+			echo "gpt $d primary24k=$(dd if=/dev/$d bs=4096 count=6 2>/dev/null | sha256sum | cut -d ' ' -f 1) backup20k=$(dd if=/dev/$d bs=4096 skip=$((size / 4096 - 5)) count=5 2>/dev/null | sha256sum | cut -d ' ' -f 1)"
+			for p in $b/$d*; do
+				[ -e "$p/partition" ] || continue
+				name=$(sed -n 's/^PARTNAME=//p' "$p/uevent")
+				bytes=$(($(cat "$p/size") * 512))
+				digest=-
+				[ $bytes -le 134217728 ] && digest=$(sha256sum "/dev/${p##*/}" | cut -d ' ' -f 1)
+				echo "part ${p##*/} name=$name start512=$(cat "$p/start") bytes=$bytes ro=$(cat "$p/ro") sha256=$digest"
+			done
+		done
+		ufs_stats | sed 's/^/after /'
+		echo 'dmesg:'
+		dmesg | grep -iE 'ufs|smmu|scsi|1d84000|qcom-ice|1d88000' | tail -n 200
+	} > "$out.tmp" 2>&1
+	mv -f "$out.tmp" "$out"
+	for d in $(ufs_disks); do echo 1 > /sys/block/$d/device/delete; done
+	sleep 1
+	echo "removed; remaining UFS disks: $(ufs_disks | tr '\n' ' ')" >> "$out"
+	sync
+	say "ufsprobe: done, remaining UFS disks: $(ufs_disks | wc -l)"
+}
+'''
+
 USBROOT = r'''
 # Boot the Armada root image from a USB disk labelled @USB_LABEL@: the cable to
 # the PC is swapped for the disk after the boot menu. The squashfs image is
@@ -152,6 +233,7 @@ usbroot() {
 	say "usbroot: found $dev, role $(cat /sys/class/usb_role/*/role 2>/dev/null), speed $(cat /sys/bus/usb/devices/*/speed 2>/dev/null | tr '\n' ' ')"
 	mkdir -p /usb /lower /sysroot
 	mount -t ext4 -o rw,noatime "$dev" /usb || { say 'usbroot: cannot mount the USB disk'; return; }
+	# UFS_PROBE_HOOK
 	img=/usb/opd/root.squashfs
 	size=$(stat -c %s $img 2>/dev/null)
 	if [ "$size" != @ROOT_SIZE@ ]; then say "usbroot: image size $size, expected @ROOT_SIZE@"; umount /usb; return; fi
@@ -426,6 +508,14 @@ netroot
 '''
 
 
+def usbroot(ufs_probe=False):
+    """The usbroot section, optionally with the read-only UFS probe."""
+    if not ufs_probe:
+        return USBROOT.replace('\t# UFS_PROBE_HOOK\n', '')
+    return UFS_PROBE + USBROOT.replace(
+        '\t# UFS_PROBE_HOOK\n', '\tgrep -qw opd.ufsprobe /proc/cmdline && ufsprobe\n')
+
+
 def entry(name, mode, data=b'', ino=1, rdev=(0, 0)):
     name_b = name.encode() + b'\0'
     fields = [ino, mode, 0, 0, 1, 0, len(data), 0, 0, rdev[0], rdev[1], len(name_b), 0]
@@ -468,6 +558,9 @@ def main():
                     help='Boot this root image from the USB disk --usb-label (writable layer on the disk)')
     ap.add_argument('--usb-label', default='OPDARMADA')
     ap.add_argument('--usb-wait', type=int, default=300, help='seconds to wait for the USB disk')
+    ap.add_argument('--ufs-probe', action='store_true',
+                    help='--usbroot: with opd.ufsprobe on the command line, report on the internal '
+                         'UFS read-only, then remove it (needs a DTB with UFS enabled)')
     ap.add_argument('--overlay-module', type=Path, help='overlay.ko from the same kernel build')
     ap.add_argument('--netroot-tree', type=Path, help='Test files copied over the root (netroot_overlay.py)')
     ap.add_argument('--upper-mib', type=int, default=3072, help='tmpfs writable layer size')
@@ -513,6 +606,8 @@ def main():
         raise ValueError('--netroot replaces --usb-ncm and needs --overlay-module and --netroot-tree')
     if a.usbroot and (a.netroot or a.usb_ncm or not a.overlay_module or not a.netroot_tree):
         raise ValueError('--usbroot excludes --netroot/--usb-ncm and needs --overlay-module and --netroot-tree')
+    if a.ufs_probe and not a.usbroot:
+        raise ValueError('--ufs-probe needs --usbroot (the report is written to the USB disk)')
     root_size = root_sha256 = None
     root_image = a.netroot or a.usbroot
     if root_image:
@@ -531,8 +626,8 @@ def main():
         gadget = USB_GADGET.replace('@FUNCTIONS@', ' + '.join(name for name, _ in functions)) \
                            .replace('@FUNCTION_SETUP@', ''.join(setup for _, setup in functions))
     init = INIT.replace('# USB_LOG_HOOK', gadget) \
-               .replace('# NCM_TEST_HOOK', NETROOT if a.netroot else USBROOT if a.usbroot else NCM_TEST if a.usb_ncm
-                        else DISPLAY_PROBE if a.display_probe else '') \
+               .replace('# NCM_TEST_HOOK', NETROOT if a.netroot else usbroot(a.ufs_probe) if a.usbroot
+                        else NCM_TEST if a.usb_ncm else DISPLAY_PROBE if a.display_probe else '') \
                .replace('@PROBE_AT@', str(a.display_probe or 0)) \
                .replace('@USB_LABEL@', a.usb_label).replace('@USB_WAIT@', str(a.usb_wait)) \
                .replace('\t# DEBUG_SHELL_HOOK\n', DEBUG_SHELL.lstrip('\n') if a.debug_shell else '') \

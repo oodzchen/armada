@@ -14,7 +14,7 @@
 | 四：Armada 设备移植与 USB 试启动 | 完整系统已进入桌面/游戏模式；显示、触控、磁吸键盘、触控板、Wi-Fi 和桌面音频已实测。配套内核/1594 模块及 USB 持久层工作；1408 音频源码、拓扑和 UCM 已纳入构建，服务失败项已清零 | 完整新镜像/全新可写层冷启动；逐颗扬声器、麦克风增益和开机 APM 超时；挂起恢复与长期稳定性 |
 | 五：安装与固化双启动 | 部分：kShimC 菜单已固化到 `boot_b`，但 Linux 启动文件仍内嵌在 boot、根文件系统仍在 U 盘 | 内部 ESP/根/数据布局、最终 boot（不再内嵌 ESP）、升级/恢复方案及多轮双系统启动回归 |
 
-**下一项工作**：Linux 内部 UFS 只读候选（§21.2 第 2 项）。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
+**下一项工作**：确定机内空间方案（§21.2 第 3 项；Linux UFS 只读探测已通过，§19.40）。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
 
 **剩余工作量**主要在：从源码完整重建新镜像并完成全新可写层/冷启动回归、其余外设和休眠稳定性、内部存储与 ESP 布局、双启动固化及升级/恢复方案。桌面/游戏模式、USB 根文件系统和 Wi-Fi 已有实测记录，不再列为尚未启动。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
 
@@ -1300,6 +1300,13 @@ CRC verified; 0 bytes recovered relative to first replica
 - **其它观察**：`qcom-iris` 视频固件加载失败（armada17 起已有）、开机一次 APM CMD 超时、一次 GMU fenced write 延迟、powerdevil ddcutil 无 i2c 权限，均不影响本轮验收。
 - **状态**：设备在 armada19（原配置）桌面，Wi-Fi 可调试，U 盘留在平板上。每次换 Armada 启动文件（内核/initramfs/root 哈希）都需要重写 `boot_b`，可在 Android 中用 root 写入并回读，无需电脑。
 
+### 19.40 Linux 内部 UFS 只读探测通过（2026-11-04）
+
+- **方法**：`smoke_initramfs.py --ufs-probe` 加入 `ufsprobe`：仅在 `opd.ufsprobe` 下运行，UFS 盘一出现即对整盘和每个分区 `blockdev --setro`（内核 `bdev_read_only()` 对分区继承整盘标志，写 bio 在 blk-core 被拒），之后记录主机/设备描述符、每个 LUN 的容量/扇区、GPT 主表前 24 KiB 与备份表末 20 KiB 的 SHA-256、所有 ≤128 MiB 分区的 SHA-256、前后 diskstats 和内核日志，写到 U 盘 `opd/probes/ufs-N.txt`，最后删除 UFS 的 SCSI 设备再 switch_root，桌面系统看不到内部存储。`tests/ufsprobe-report-test.sh` 用伪造 sysfs/dev 验证只读先于读取、只处理 UFS 盘、哈希与删除正确，在平板 BusyBox（`52151e7f…`）上通过。
+- **boot**：`output/opd2413-stage4/ufs1/`，root 仍为 armada19；只改 `/init`，ESP 新增 `board4.dtb`（仅 UFS host/PHY 两个 `status` 改为 okay）和 `UFS READ-ONLY PROBE` 项，其余项仍禁用 UFS。`boot_b` 经无线 adb 在 Android 中以 root 写入（`android-write-boot-b.py`：推送→设备端校验→dd→清缓存回读整分区），`9d91e3a9…` → `368a4efc…`，vbmeta 已迁移。
+- **结果（`ufs1/ufs-1.txt`）**：三星 KLUFG4NHHB（UFS 4.0，rev 1200），6 个 LUN 5 s 内出现，MCQ 9 队列，ICE v4.0.3；6 盘、129 个分区全部 `ro=1`，**写入次数/扇区/flush 全为 0**；6 个 LUN 容量、4 KiB 逻辑扇区与备份一致，**12 份 GPT 主/备份表与 11-02 备份逐字节一致**；119 个分区哈希中两个槽位的 boot/init_boot/vendor_boot/dtbo/recovery/vbmeta 全部一致（boot_b 为新写入值）；仅 persist、oplusreserve1/3/5、spunvm 不同，回到 Android 再读时 persist/oplusreserve1/5/spunvm 又变化，确认为 Android 运行时写入。无 UFS 错误、无 SMMU fault；寿命估计 0x01。链路当前为 HS-G2（UFS 4.0 应可到 G5，性能问题以后看）。删除设备后 UFS 主机 runtime suspend，系统 running、失败单元 0。重启回 Android 正常，Android 内核日志无 ufshcd 错误（`android-after-probe.txt`）。
+- **存储布局事实（只读）**：6 个 LUN 均无未分配空间；userdata 在 LUN0 末尾（460 GB，已用 153 GB），f2fs + FBE + 元数据加密（密钥在 TEE），Linux 无法读取、f2fs 不能在线缩小；Virtual A/B（压缩）。机内安装 Armada 必须从 userdata 取得空间，见 §21.2 第 3 项。
+
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 
 | 内容 | 位置 |
@@ -1395,7 +1402,7 @@ python3 porting/oneplus-pad-2-pro/linux/decode_smoke.py \
 | 顺序 | 当前基础与缺口 | 完成标准 |
 |---|---|---|
 | 1. 最新独立镜像（§19.39 已通过） | armada19 在固定基础层上从源码输入构建，全新可写层首启/再启和旧配置启动均通过；尚未从零（含基础层）完整重建 | 后续基础层更新时按同一判据从零重建验收 |
-| 2. Linux内部UFS | U-Boot已完成只读LUN/GPT/文件系统读取；当前Linux DT仍主动禁用UFS/PHY，不能据此认定Linux内部存储可用 | USB根保持不变，先用单独候选启用Linux UFS，只读核对6个LUN、4KiB逻辑扇区、容量/GPT及选定数据哈希，核查I/O/SMMU错误，回Android验证；之后才对专用Linux空间做写入/持久性测试 |
+| 2. Linux内部UFS（只读部分 §19.40 已通过） | Linux 只读探测：6 LUN/4KiB/GPT/分区哈希与备份一致，写入 0，无 I/O/SMMU 错误，回 Android 正常；写入/持久性测试需要专用 Linux 空间 | USB根保持不变，先用单独候选启用Linux UFS，只读核对6个LUN、4KiB逻辑扇区、容量/GPT及选定数据哈希，核查I/O/SMMU错误，回Android验证；之后才对专用Linux空间做写入/持久性测试 |
 | 3. 内部空间与安装方案 | 尚无Armada机内ESP/root/data空间；userdata占据所在LUN尾部。通用 `armada-installer` 首装会重建/缩小userdata并清除Android用户数据，不能直接沿用 | 给出本机具体布局、容量、备份/数据迁移和恢复方案，逐分区列明写入范围。保留Android系统与保留Android现有数据分别验收；目前没有通过验证的无损安装方案 |
 | 4. 正式根部署与机内启动文件 | 当前USB squashfs+overlay不满足现有安装器要求的booted OSTree源；早期initramfs还按USB标签找根，ESP/内核/initramfs目前打包进临时boot | 形成可安装且可更新回滚的内部部署；initramfs按稳定UUID/PARTUUID挂载内部根与持久数据；U-Boot从机内ESP加载匹配内核/initramfs/DTB，不再等待USB。先保留fastboot临时启动进行验证 |
 | 5. 固化kShimC | 已写入 `boot_b`（§19.39，保留 AVB vbmeta），菜单/ColorOS/Armada 均可从闪存启动；当前 boot 仍内嵌 ESP | 使用与当前Android匹配的最终boot，先临时启动核对两项；最后按明确写入范围固化当前槽位，不替换OEM ABL。拔U盘和电脑，冷开机至少10轮覆盖两系统选择、默认Android及失败恢复 |
@@ -1414,4 +1421,4 @@ python3 porting/oneplus-pad-2-pro/linux/decode_smoke.py \
 | USB与已知清理项 | USB 3方向切换、USB/Hub/充电组合；开机APM超时及1406无效teardown清理。USB 3不是最终机内根的前提，但其余接口使用仍需测试 |
 | Android回归与维护 | 两系统多轮冷启动/切换后，复查Android解锁、指纹、Wi-Fi、充电及既有KernelSU/susfs；核对预期boot内容和非目标分区未被更改，再验证更新与恢复 |
 
-**唯一下一步**：Linux 内部 UFS 只读候选（§21.2 第 2 项），仍保持 USB 根不变、不写内部介质。独立镜像与全新可写层已验收、kShimC 已写入 `boot_b`（§19.39）；设备在 armada19 桌面，U 盘留在平板上，换启动文件时需按 §19.39 重写 `boot_b`。
+**唯一下一步**：确定机内空间方案（§21.2 第 3 项）；Linux UFS 只读探测已通过（§19.40），仍保持 USB 根不变、不写内部介质。独立镜像与全新可写层已验收、kShimC 已写入 `boot_b`（§19.39）；设备在 armada19 桌面，U 盘留在平板上，换启动文件时需按 §19.39 重写 `boot_b`。
