@@ -14,7 +14,7 @@
 | 四：Armada 设备移植与 USB 试启动 | 基础内核检查点通过：8 核、约 14.5 GiB 可用内存、msm DRM 显示、NT36536 触控事件、ADSP/SOCCP、SCMI v2.0/两个性能域、USB ACM 实时日志；USB NCM（high-speed，约 14.5 MiB/s，双向 SHA-256 校验通过）；完整内核包（1594 个模块、29 份 DTB）已离线构建；五轮均自动返回 ColorOS | 完整 Armada rootfs（构建中）及 RAM 启动（C）；DSI PLL/面板命令告警；GPU、Wi-Fi 等硬件 |
 | 五：安装与固化双启动 | 未开始；仍使用临时启动镜像 | 确定系统存放位置、最终 boot 镜像、升级/恢复方案及多轮双系统启动回归 |
 
-**下一项工作**：用含 1407 的内核重新生成完整 Armada 镜像（替换 armada13 中继承 1406 的内核），做 U 盘完整桌面启动和断电冷启动验证。之后可选：去掉 1406 中无效的 DPU 侧 teardown 并做回归；向上游讨论开机复位前的 AXI halt。本轮 20 次临时启动授权已用完，下次上机需要重新授权。
+**下一项工作**：1407 已在完整系统中通过桌面和游戏模式验证（§19.27–19.28，当前镜像 armada16）。接下来是音频：缺少 `OnePlus-Pad-2-Pro-tplg.bin` 拓扑，扬声器链路需要新写（§19.28）。其他待办：断电冷启动验证；去掉 1406 中无效的 DPU 侧 teardown 并做回归；USB 3 方向切换；U 盘镜像里的 dracut `initramfs.img` 仍是旧模块。
 
 **剩余工作量**主要在：完整 Armada 用户空间、USB 主机/存储或网络路径、GPU/Wi-Fi 等驱动与固件、根文件系统及 ESP 的安装位置、双启动固化与升级/恢复方案。显示和触控已完成内核级初验，桌面交互、GPU 加速、休眠和长期稳定性仍待验证。USB ACM 通信成功不能代替 USB 主机/存储测试。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
 
@@ -1143,6 +1143,22 @@ CRC verified; 0 bytes recovered relative to first replica
 - **根因（已确认）**：ABL 交接时，CTL_0 与 VIG0–3 仍在扫描输出，并开启了 programmable fetch（帧尾前 25 行开始预取下一帧）。`msm_mdss_init()` 直接拉 MDSS core BCR，pipe 已经发出的下一帧预取（第 46/47 行交界）残留在复位之外。KMS 换成新页表后，第一次 MDSS 总线事务（首条 DSI 命令 DMA）把它放出，它 fault 后堵住 MDSS 读通路，两路 DSI DMA 永久 busy，导致黑屏。只要复位前 VBIF AXI 能拿到 ACK（说明总线已排空），就不会出现这个问题。
 - **修复（1407）**：BCR 之前依次：通过 CTL INTF flush 关掉 programmable fetch，等新帧生效 → 停 DSI timing engine → CTL 复位 → VBIF AXI halt 并要求 ACK → BCR；复位后只碰 VBIF 释放 halt。补丁已放入 series（`1407-drm-msm-mdss-retire-opd2413-boot-scanout-before-reset.patch`，紧接 1406），PATCHES.md 已登记，1406 的说明也已更正。干净的 7.2.6 按 series 应用 300 个补丁全部零 fuzz，hunk 数逐个核对；`drivers/gpu/drm/msm`、`arm-smmu`、`panel` 与实测源码逐字节一致。checkpatch 仅剩日志参数宏一条误报。寄存器模型 `linux/test_mdss_boot_handoff.py` 10 个场景通过，8 个变异反例都被测出。仍未提交。
 - 1406 中 DPU 侧的 INTF 停机和 CTL 清理在复位之后执行，实际上什么也不做，只是因为与实测配置一致才保留。identity 默认域条目是必要的。以后如果要精简 1406，需要另做回归。
+
+### 19.27 完整系统验证：armada14 模块不配套失败，armada15 桌面通过（2026-11-04）
+
+- 代码已提交：`98f8101`（1406/1407 补丁、series、PATCHES.md、两套寄存器模型、压力脚本）、`0184dba`（本文档）。用户授权完整系统各测 1 次桌面和游戏模式。
+- **armada14 失败（与显示无关）**：在 armada13 的基础上只把 ESP 内核换成 quiesce3 内核。U 盘镜像校验通过（约 200 s）后，`insmod /opd/overlay.ko` 报 `failed to validate module [overlay] BTF: -22`，随后自动回到 Android，槽位/哈希不变。原因：`CONFIG_DEBUG_INFO_BTF_MODULES=y`，每次重编 vmlinux，旧模块的 BTF 都对不上。armada10–12 用的一直是第五轮内核 `c8614378…`，与 U 盘里那套模块属于同一次构建；之后重编的内核只跑过不加载模块的冒烟 initramfs，所以问题一直没暴露。armada13 当时只做了离线比对，同样有这个问题。**教训：换内核必须连同模块一起重编并部署，不能只换 `vmlinuz.efi`。**
+- **armada15**：在同一棵源码树上一次编出 `vmlinuz.efi`（`015e5b2f…`，代码与实测的 `aff4d782…` 相同，只是构建时间戳不同）和 1594 个模块（`INSTALL_MOD_STRIP=1`，模块清单与旧内核包、U 盘镜像完全一致）。initramfs 只替换 `opd/overlay.ko`（直接改写 newc 流，134 个条目不变，`181755df…`）。新模块树经用户同意通过 pkexec 写入 U 盘可写层 `opd/upper/usr/lib/modules/7.2.6`：1610 个文件逐个校验，清单存为 `opd/modules-overlay.sha256`；只读的 `root.squashfs` 不改动；可写层原先没有 `usr/lib/modules`，删掉这个目录即可恢复。镜像 `armada15/read-boot.img` `af5ef0c6becc19b477d27bb95a04f17d2f688ed442bda92efaee19490b00b167`，暂存的模块树在 `armada15/stage/`。U 盘镜像里的 `initramfs.img`（dracut，正式 ostree 启动用）仍是旧模块，U 盘启动路径用不到，以后重新出镜像时需要一并更新。
+- **armada15 桌面模式通过（用户实测）**：内核接管后正常显示并进入桌面，单指/多指触屏、磁吸键盘、键盘触控板及其多指手势都正常。
+- U 盘每次启动都要完整 SHA-256 校验约 3.4 分钟（USB 2.0 下读 6.7 GB）。用户觉得太慢，计划改成"首次完整校验、之后比对记录"，正式安装时再换成 dm-verity。
+- SSH 只读取证（armada15，运行约 650 s）：报告行 `prog fetch off 0x3 … stopped 0x3 in 8466 us, ctl 0x1 reset soft in 3 us, axi halt ack 00000031 in 1 us`，紧接着 `panel prepared`；两路 `dsi_isr` 都是 122；没有 SMMU fault 和 DCS 失败；加载了 92 个模块；`degraded` 只来自已知的 `armada-controller-type`。304 s 出现两次 `vblank timeout`（相隔 60 ms），前后没有用户态事件，画面一直正常，与第八轮 830 s 的现象相同，属于"超时告警但画面正常"一类，暂不追。日志在 `armada15/live-{dmesg,journal-k,journal}.txt`。注意：这个启动项没有 `log_buf_len`，dmesg 会覆盖开机阶段，要用 `journalctl -k -b`。
+
+### 19.28 校验改为首次完整校验；游戏模式通过；音频缺拓扑（2026-11-04）
+
+- `smoke_initramfs.py --usbroot`：完整校验通过后写 `opd/root.verified`（`v1 size inode mtime ctime sha256`）。之后只比对这份记录；镜像被替换或改写会改变 inode/ctime，记录随之失效；`opd.verify=full` 强制完整校验；校验失败时删除记录。在主机 `sh` 上测了 6 个场景，全部符合预期（initramfs 里 busybox 1.36.1 的 `grep -w`、`stat %i/%Y/%Z` 已确认支持；它在 binfmt/qemu 下无法测 standalone 小程序，所以没用它跑控制逻辑）。initramfs 的处理方式：先用旧模板加原参数逐字节重现 `/init`，再只替换校验段。**armada16**（`909c3d96…`）= armada15 + 新 initramfs（`0a61661d…`），内核和模块不变。
+- armada16 实机：第一次完整校验并写入记录；第二次启动 `full check skipped`，换上 U 盘后几秒就继续启动。
+- **游戏模式通过（用户实测）**：第一次停在 Steam 加载界面，原因是直连 Steam 超时（`store.steampowered.com` 直连超时，走用户局域网 HTTP 代理返回 200）。代理写在 `/etc/environment.d/90-opd-proxy.conf`（只在 U 盘可写层；Steam 跑在 systemd 用户服务里，从 environment.d 继承变量，`no_proxy` 排除本机和局域网）。重启后 Steam 先安装上次已下载的客户端更新（启动画面显示 "Still starting…"，约 3 分钟），随后进入界面，触屏、键盘、触控板都正常。
+- **音频：没有声卡**。ADSP 在运行，q6apm/q6prm、LPASS 宏、WCD939x、6 颗 AW88261、sc8280xp 声卡驱动和 SoundWire 都已加载，但 `qcom-apm: tplg firmware loading qcom/sm8750/OnePlus-Pad-2-Pro-tplg.bin failed -2`，于是 `snd-sc8280xp: failed to instantiate card -2`。DT 声卡链路：扬声器 CPU DAI 40、WCD 放音 113、WCD 录音 120、DP 104。KONKR 拓扑里的 WCD/DP 段可以复用；扬声器端口不同（KONKR 用 `SECONDARY_MI2S_RX`），需要为这台平板编写 `audio_topology/sm8750/SM8750-OnePlus-Pad-2-Pro.m4` 并生成拓扑文件，属于第 G 项音频移植。
 
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 

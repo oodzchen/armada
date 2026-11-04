@@ -155,10 +155,22 @@ usbroot() {
 	img=/usb/opd/root.squashfs
 	size=$(stat -c %s $img 2>/dev/null)
 	if [ "$size" != @ROOT_SIZE@ ]; then say "usbroot: image size $size, expected @ROOT_SIZE@"; umount /usb; return; fi
-	say 'usbroot: checking image SHA-256...'
-	digest=$(sha256sum $img | cut -d ' ' -f 1)
-	if [ "$digest" != @ROOT_SHA256@ ]; then say "usbroot: image digest mismatch: $digest"; umount /usb; return; fi
-	say "usbroot: image verified, $size bytes"
+	# A full check reads the whole image, minutes over USB 2.0. Once one has
+	# passed, a record of the file's identity sits next to it; replacing or
+	# rewriting the image changes its inode or ctime and voids the record.
+	# opd.verify=full on the kernel command line forces the full check.
+	record=/usb/opd/root.verified
+	stamp="v1 size=$size inode=$(stat -c %i $img) mtime=$(stat -c %Y $img) ctime=$(stat -c %Z $img) sha256=@ROOT_SHA256@"
+	if ! grep -qw opd.verify=full /proc/cmdline && [ "$(cat $record 2>/dev/null)" = "$stamp" ]; then
+		say "usbroot: image matches its verification record, full check skipped ($size bytes; opd.verify=full forces it)"
+	else
+		rm -f $record
+		say 'usbroot: checking image SHA-256...'
+		digest=$(sha256sum $img | cut -d ' ' -f 1)
+		if [ "$digest" != @ROOT_SHA256@ ]; then say "usbroot: image digest mismatch: $digest"; umount /usb; return; fi
+		echo "$stamp" > $record.tmp && mv -f $record.tmp $record && sync
+		say "usbroot: image verified, $size bytes, verification record written"
+	fi
 	insmod /opd/overlay.ko || { say 'usbroot: overlay module failed'; umount /usb; return; }
 	mount -t squashfs -o ro,loop $img /lower || { say 'usbroot: squashfs mount failed'; umount /usb; return; }
 	mkdir -p /usb/opd/upper /usb/opd/work
