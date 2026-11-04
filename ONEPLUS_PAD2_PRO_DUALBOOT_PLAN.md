@@ -1,8 +1,8 @@
 # 一加平板 2 Pro（SM8750）Android / Armada 双启动方案
 
-> 状态（2026-11-03，第六轮：完整 Armada 首次从 RAM 启动到游戏模式）：阶段一、二检查点已通过；阶段三的启动链已基本具备。**Armada 7.2.6 已经 kShimC → U-Boot → systemd-boot → EFI stub 进入 RAM 用户态，显示、触控事件、ADSP/SOCCP、SCMI、USB 设备模式日志通道与 USB NCM 网络（1 GiB 上行、256 MiB 下行逐块校验）通过验证，自动返回 ColorOS。** 完整 Armada 用户空间、USB 主机/存储模式和固化双启动尚未完成，根文件系统与最终 ESP 位置未定。
+> 状态（2026-11-04，开机黑屏已定位根因并修复，待完整镜像验证）：完整 Armada 已通过 RAM/USB 路径进入游戏及桌面模式（历史细节见 19.8–19.13）。约 1/4 开机出现的黑屏，根因是开机 MDSS 复位打断了 ABL 的扫描输出（开启了 programmable fetch），残留的预取请求堵死了 MDSS 读通路。新补丁 1407 在复位前先关 prog fetch、停 INTF、复位 CTL，并要求 VBIF AXI halt 拿到 ACK。临时启动 16/16 通过（§19.23–19.26），补丁已放入 series，尚未提交。Android 保留，仍只做临时启动，尚未固化双启动。
 > 本文中标注 **【待验证】** 的内容尚未在实机上确认，不能当作事实使用。
-> **继续工作时先读第 19.8–19.13、20 节。** 第 17、18 节及更早测试保留为历史对照；其中的旧“下一步”、补丁计数和未实现状态不代表当前进度。不要从已完成的 UFS NOP、EFI、erhai 点屏或 Armada 触控测试重新开始。
+> **继续工作时先读第 19.23–19.26 节（2026-11-04 黑屏根因与 1407 修复），再读 19.8–19.13、20 节；19.14–19.22 是已被证伪的候选，留作历史对照。** 第 17、18 节及更早测试保留为历史对照；其中的旧“下一步”、补丁计数和未实现状态不代表当前进度。不要从已完成的 UFS NOP、EFI、erhai 点屏或 Armada 触控测试重新开始。
 
 ## 当前进度与剩余工作
 
@@ -14,11 +14,11 @@
 | 四：Armada 设备移植与 USB 试启动 | 基础内核检查点通过：8 核、约 14.5 GiB 可用内存、msm DRM 显示、NT36536 触控事件、ADSP/SOCCP、SCMI v2.0/两个性能域、USB ACM 实时日志；USB NCM（high-speed，约 14.5 MiB/s，双向 SHA-256 校验通过）；完整内核包（1594 个模块、29 份 DTB）已离线构建；五轮均自动返回 ColorOS | 完整 Armada rootfs（构建中）及 RAM 启动（C）；DSI PLL/面板命令告警；GPU、Wi-Fi 等硬件 |
 | 五：安装与固化双启动 | 未开始；仍使用临时启动镜像 | 确定系统存放位置、最终 boot 镜像、升级/恢复方案及多轮双系统启动回归 |
 
-**下一项工作**：C 已基本通过（第 19.8 节）：完整 Armada 经 NCM 下载到 RAM，systemd 到 graphical.target，游戏模式（gamescope + Steam）运行，GPU、显示、Wi-Fi、磁吸键盘可用。下一轮先修触控固件（rootfs 缺 `novatek/nt36536-xn242.bin`），再做 D（触控映射/桌面模式）与 E（确认 Vulkan 渲染器、GPU 稳定性）；之后是 F/G 外设、USB 3 PHY（提速）、H 稳定性、I 安装。
+**下一项工作**：用含 1407 的内核重新生成完整 Armada 镜像（替换 armada13 中继承 1406 的内核），做 U 盘完整桌面启动和断电冷启动验证。之后可选：去掉 1406 中无效的 DPU 侧 teardown 并做回归；向上游讨论开机复位前的 AXI halt。本轮 20 次临时启动授权已用完，下次上机需要重新授权。
 
 **剩余工作量**主要在：完整 Armada 用户空间、USB 主机/存储或网络路径、GPU/Wi-Fi 等驱动与固件、根文件系统及 ESP 的安装位置、双启动固化与升级/恢复方案。显示和触控已完成内核级初验，桌面交互、GPU 加速、休眠和长期稳定性仍待验证。USB ACM 通信成功不能代替 USB 主机/存储测试。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
 
-**当前设备状态**（2026-11-03 第五轮返回后）：ColorOS 正常启动，b 槽，`boot_b` SHA-256 仍为 `0e5afd65d6c92bb12c3a319ddcbcfc9ffaac6a68e22c567c4a6ef1cf82705e49`；用户确认解锁、指纹、Wi-Fi、KernelSU/susfs 全部正常。所有实验均为 `fastboot boot` 临时启动，未刷写分区、未改 GPT、未格式化、未刷 OEM ABL；Linux 冒烟 DT 禁用 UFS/PHY，块设备仅 loop0–7。普通重启仍进入原有 Android，尚未固化 kShim 菜单。文档本身不提交。
+**原 Android 基线状态**（2026-11-03；本轮每次返回复核槽位和 boot 哈希）：ColorOS 正常启动，b 槽，`boot_b` SHA-256 仍为 `0e5afd65d6c92bb12c3a319ddcbcfc9ffaac6a68e22c567c4a6ef1cf82705e49`；用户确认解锁、指纹、Wi-Fi、KernelSU/susfs 全部正常。所有实验均为 `fastboot boot` 临时启动，未刷写分区、未改 GPT、未格式化、未刷 OEM ABL；Linux 冒烟 DT 禁用 UFS/PHY，块设备仅 loop0–7。普通重启仍进入原有 Android，尚未固化 kShim 菜单。文档本身不提交。
 
 ---
 
@@ -1017,7 +1017,132 @@ CRC verified; 0 bytes recovered relative to first replica
 - 复用：OnePlusOSS SM8750 Android 16 的 `dsi_display_broadcast_cmd` / `dsi_ctrl_hw_cmn_kickoff_command` 明确配置 bit31 广播、bit30 主端，先 stage 两端，再触发从端、最后主端；只在主端等完成 IRQ。另有同 SoC Lenovo 开发者在 2026-11-02 的 dri-devel 原始回复报告相同 `0x20003` 症状（线索，不能代替本机实测）。原始源码保存在 `/tmp/opd-vendor-*`。
 - 单变量实验：保留 stress5 的内核配置、DT、initramfs、诊断与已证伪的旧重试，以 `broadcast1/before/` 保存源码和二进制；只替换 SM8750 同步写命令的 DMA 广播路径。完成后须去掉面板盲重试等临时诊断。
 - 判据：面板第一次 prepare 成功、DCS/DMA/vblank 超时为 0，显示提交后两端硬件均完成；重复临时启动对照（目标至少 20 次）且每轮 Android 槽位/boot 哈希不变。若同样失败两次，停止当前候选，回到最早错误层。
-- 尚未上机；设备仍在 Android。上机前形成镜像哈希、负载核对和独立审查，遵循 18.5 的每轮确认要求。
+- 用户已授权本轮最多 20 次自动临时启动并确认其他任务已停止、由当前 agent 独占设备。镜像 SHA-256 `9808892870cc1df646406653b098f96790a59a32853cbc70265963ae8f2fbbb3`；负载比对、独立审查、实际 C 事务的寄存器模型正反例通过。QEMU 原 ESP 默认 Linux 的菜单等待超过测试期限，因此不算通过；仅把 loader 默认改为 reboot 的等价 ESP 回归 EL1/EL2 Android 交接通过（不证明 DSI）。开始前 Android b 槽/boot 哈希正确、电量 100%。
+- 首次编排未发送候选：`adb reboot bootloader` 后 sandbox 的 `/dev` 视图没有新 USB 节点，脚本等 fastboot 90 s 超时，设备停在原厂 START。主机权限环境确认 b 槽后正常 `fastboot reboot`，Android 原 boot 哈希不变。后续编排在主机实时 USB 环境执行；这是主机通道失败，不计入显示样本。
+- 注意：另一任务在准备期间把 1403/1404/1405 提交到了 series，并删去了 PLL 成功/调用栈日志；候选保留实际编译到的 PLL 失败清理，不把这些早期告警改变当作广播修复证据。源码哈希与差异保存于 `broadcast1/`。
+
+### 19.15 显式广播未修复；控制器复位时钟域差异（2026-11-03，失败；见 19.16）
+
+- `broadcast1` 第 1 轮通过（122 次主端完成、从端轮询通过），第 2 轮首条 `ff 20` 失败，自动停止并回 Android；两端 IRQ 0，主端 `STATUS0=0x20003`。证据 `broadcast1/runs/`。广播位与触发顺序不是本机黑屏的充分修复，候选未加入 series。
+- 新的更早差异：厂商 `dsi_ctrl_hw_cmn_soft_reset` 在复位前清除 CTRL 的 DSI/VIDEO/CMD 三个引擎位，并临时设置 `DSI_CTRL_DYNAMIC_FORCE_ON = 0x23f | BIT(8) | BIT(9) | BIT(11) | BIT(21)`；主线只清 DSI_EN，CLK_CTRL 只写 `0x23f`。门控的字节/像素域可能没有收到复位，这是待实验证伪的假设，不能仅凭厂商差异宣布根因。
+- 单变量 `reset1`：撤销整个广播候选，恢复旧同步 DMA 路径；仅对 SM8750 按厂商顺序临时打开复位所需动态域，1 us 脉冲后还原 CLK_CTRL 与 CTRL，不永久关门控、不加启动延时、不做命令重试。原 1403 重试暂留作对照，成功判据仍要求第一次成功。其余 SoC 维持原复位路径。
+- 判据同 19.14。该候选后由另一任务实测失败，见 19.16；不再次重复。
+
+### 19.16 接续另一任务的 reset/vid/diag 证据（2026-11-03）
+
+- 另一任务已跑过相同 reset1 镜像：第 1 轮第 5 条命令 `fb 01` 失败，两路各 4 IRQ；`reset2` 未上机。`vid1` 延后 VIDEO_MODE_EN 到 bridge enable，仍首条 `ff 20` 失败，CTRL=0x1f5 证明视频位确实关闭。两个候选都不足以修复，不能推广为这些机制在所有场景都无关。
+- `diag1` 首轮通过、第 2 轮失败；原始证据均在 `output/opd2413-stage4/{reset1,vid1,diag1}/runs/`。从另一任务用户给的记录接续，当前没有运行中的压力脚本；后续由本任务独占设备。
+- 已自行重新解析 diag1 全部寄存器，每阶段每路 255 个 32 位值（缺失不能当零）：正常/失败的 pre-init 和 pre-trigger 全部一致。失败从 pre-trigger 到 timeout，DSI0 仅 DMA_BASE/LEN、TRIG_DMA、未知 0x394 改变；DSI1 额外 STATUS0=0x20003、CLK_STATUS=0x8077c3。解析结果在 `diag1/parsed-registers.json`。
+- 更正：STATUS0.INTERLEAVE_OP_CONTENTION 是 bit31，不能把 0x20003 的 bit17 说成视频争用；CLK_STATUS 的动态位反映活动状态，单独为 0 不证明 CCF 链路时钟被关闭。广播单独失败不等于广播无关。
+- 新的单变量 `clkxfer1`：恢复 stress5/1405 基线，保留原同步 DMA；仅在 SM8750 的命令事务范围内，按厂商 0x200b3f 掩码保持动态域运行，覆盖 CMD_MODE_EN → DMA → 恢复 CTRL，随后还原原始 CLK_CTRL。与 reset1 的区别是覆盖真正命令事务，而非只覆盖复位脉冲。不全局禁用门控、不增加延时或重试。假设：触发/命令状态跨动态域时缺少运行条件，软件可读配置一致但内部状态机未接收控制更新。
+- 通过标准：首次 prepare 成功，DCS/DMA/vblank 超时均为 0；最终需要无重试和最小化日志的重复启动回归。独立审查、实际 C prepare/restore 的 100 次 LP/HS 状态恢复模型和非 SM8750 对照、负载解包比对均通过。镜像 SHA-256 `b537083cf00e391d03949bec030c1cd7dc63dd72cbd4a5b90e56ca2e0c9c705c`。
+- 用户已授权本轮后续局部候选累计最多 20 次 `fastboot boot` 自动验证，设备由本任务独占，其他任务保持暂停。该授权覆盖同一黑屏排查内的后续局部候选，不包含任何刷写/切槽。先做至多 6 次 clkxfer1（首次失败就停止），为无重试最终候选保留测试次数。开始前 Android b 槽/原 boot 哈希正确、电量 100%，温度约 31°C。
+
+### 19.17 clkxfer1 失败；更早的 SMMU 地址翻译故障（2026-11-03）
+
+- clkxfer1 第 1、2 轮通过，第 3 轮首条 `ff 20` 失败；已停止、回 Android。仅命令期间保持动态时钟域开启不足以修复，`clkxfer2`（增加错误传播/锁和去重试的离线整理）不再上机，不加入补丁栈。本轮 20 次授权已用 3 次。
+- 重新检查完整日志发现原先“无 SMMU context fault”的说法不成立：所有样本启动约 0.7 s 已有 SID 0x800 对 `0xfc8xxxxx`（ABL framebuffer）的翻译失败；部分失败样本 1.49 s 在新 CB=9 再次访问原 framebuffer 触发 fault。其余样本早期已用尽 rate limit，不能用后续未打印就当作无 fault。好坏样本均有早期 fault，这本身不证明是黑屏根因，但它早于 DSI 且是确定的地址域错误。
+- 主线代码证据：SM8750 只在 `qcom_smmu_actlr_client_of_match` 有条目，却缺少 `qcom_smmu_client_of_match` 的 identity 默认域匹配。MDSS DT 是 `qcom,sm8750-mdss`，`iommus = <&apps_smmu 0x800 0x2>`。现有其他机型表项用于在 DRM 接管前保留 bootloader 的物理地址扫描；之后 DRM 仍可附加自己的翻译域。不是全局禁用 IOMMU。
+- 单变量 smmu1：恢复 1403/1404/1405 基线，撤销全部 reset/vid/clock/broadcast/diag 候选，仅在 identity client table 加一条 `qcom,sm8750-mdss`。判据：早期 SID=0x800 的 ABL framebuffer fault 消失，同时首次面板 prepare 和两路 DMA 正常。若 fault 消失而仍黑屏，记录该故障已修复但不足以解决黑屏，继续追踪接管时切域。
+- smmu1 已编译并完成 4 份负载解包比对；镜像 SHA-256 `c67ab5a69edce56f78165a9c6d6b04b7361a95c74ec2ac169f563e0bcf069daa`，内核 `720f6cfeade4480a87ba80263e9d81c7ce73a4f8bbf81f0c34877dfb15ba1641`。先做最多 3 次临时启动，计入剩余 17 次授权。
+
+### 19.18 默认域已修复，但 KMS 交接后仍读旧帧缓冲（2026-11-03）
+
+- smmu1 第 1 轮显示失败，自动回 Android，原槽/boot 哈希不变。早期约 0.7 s 的全部 fault 消失；1.496089 s 仍有 SID 0x800、IOVA 0xfc89ba00 的单次 fault（paging CB=8），1.696907 s 首条 DCS 超时。默认域条目确实生效，但不足以覆盖 DRM 已换页表之后的硬件访问。
+- 当前最早的可观测故障已从早期 default DMA 域收敛到 KMS 接管窗口。现有 dpu_kms_hw_init 在分配和配置显示资源前调用 _dpu_kms_mmu_init；MSM MDSS 早期全局 reset 不能用作“扫描已停稳”的实测证明。
+- 单变量 smmu2（在 smmu1 基础上）：SM8750 DPU 在换域前，依 catalog 地址写两路 DSI INTF_TIMING_ENGINE_EN=0，再轮询 INTF_STATUS.bit0 至两路实际关闭（上限 100 ms，失败拒绝换域）。该 status 与 dpu_hw_intf_get_status 对 >=5 代核心的定义一致；正常 dpu_encoder_phys_vid_disable 也必须等 disable 在 vsync 锁存。没有固定启动 sleep、重试或永久旁路。
+- 判据：打印原 active mask、停机必须完成；KMS 换域后不再 fault 旧 framebuffer，首次面板 prepare 成功，两路 DMA 正常。若 active mask 本来为 0 而仍 fault，则还需找旧读请求或非 INTF 触发来源，不能继续把它归咎于扫描未停止。本轮授权已用 4/20 次。
+- smmu2 编译、独立审查、实际 C helper 的双接口先停后等/其他 SoC与DP不触碰/超时传播模型、负载比对通过。镜像 SHA-256 `814c876866241d44e0aeb9373856d41649024b675d599679e2bc3e617ac28874`，先最多 3 次，首次失败停止。
+
+### 19.19 INTF 已关闭仍有旧读请求：清理 CTL 取数路径（2026-11-03）
+
+- smmu2 第 1、2 轮通过，第 3 轮仍失败；三轮启动前实际 INTF active mask 都为 0。失败在 1.351716 s 对旧 framebuffer 0xfc89bc00 fault，1.552466 s 首条 DCS 超时。不能再把问题仅归因于 timing engine 未停稳。证据 `smmu2/runs/`；本轮累计 7/20 次。
+- 主线历史讨论（Bjorn Andersson / Dmitry Baryshkov，2021–2022，Clear/Disable boot loader configured data paths）区分 INTF 时序与 CTL 取数路径：旧 CTL_FETCH_PIPE_ACTIVE 可能保留，不由一个 idle INTF 状态证明取数路径已退役。当前驱动已有完整 encoder teardown 对 CTL 的 clear_all_blendstages、set_active_fetch_pipes、set_active_pipes、set_active_lms 和有界 reset 操作。
+- smmu3：只对 SM8750 把 paging attach 延后到资源对象创建之后，在原 INTF 停机基础上复用上述 CTL teardown，6 条路径都成功 reset 后才 attach；任何 reset 失败拒绝换域。其他 SoC 的初始化顺序不变。保留已验证的默认 identity 条目。
+- 判据：CTL 清理/复位完成，换域后不再访问旧 framebuffer，首次面板/DMA 正常；否则停止“旧 CTL”方向，重新验证 fault 请求来源。独立审查、编译与负载比对已通过；镜像 SHA-256 `24011964a36f4c0756a8d5daeb04c0a7ff03e724ade22b008ef7f8fea2523972`，开始至多 3 次实机验证。
+
+### 19.20 CTL 退役候选通过三轮；最终回归第 8 次失败（2026-11-03）
+
+- smmu3 3/3：面板首次成功、DSI IRQ 122/122、无 SMMU/DCS/vblank fault；6 个 CTL 的清理与 reset 都完成。每轮自动回 Android、b 槽/boot 哈希不变。源码与原始日志在 `smmu3/`；本轮累计 10/20 次。
+- 最终候选 `handoff-final`：同样的 RM → INTF 停机 → CTL 退役/复位 → paging attach 顺序，限定 root compatible `oneplus,erhai` 且 DPU `qcom,sm8750-dpu`；其他板保持原初始化顺序。移除全部成功诊断打印，删除无效 1403 面板盲重试（面板源码回到原始 1400 版本）。默认 identity 域匹配仍适用于 SM8750 MDSS，不影响正常 KMS 翻译页表。
+- 已整理为 `1406-drm-msm-retire-opd2413-firmware-fetch-before-iommu.patch`，零 fuzz 应用后逐字节等于实际构建源码；主机真实 C helper 的板/SoC 门控、双接口先关、6CTL清状态后reset、INTF/CTL超时传播检查通过。未添加 Signed-off-by 以免代替人类签名；checkpatch 以 no-signoff 模式检查代码风格。
+- 观测 initramfs 保留全部原固件/BusyBox，唯一变化是 25 s 时的 `panel_on` 从重试成功文本改为面板 follower 的 `panel prepared`；逐项 cpio payload 比对、shell 语法检查通过。不会影响首次显示的启动时序。
+- 最终 boot SHA-256 `e15d09b762fd7a26a3a1efbdf3a7fcdcb4d0501029d05d6039702b043407694c`，kernel EFI `3d382df73f160196d0df67a3d1a303dac2068d95d4296d05afaedcafe8962b0d`。计划最终版本共 10 次回归，首次失败停止；另强制要求完整 dmesg 含 Linux/用户态启动标记且 SMMU context fault 为 0。尚不能把 3 次候选通过说成最终已修复。
+
+### 19.21 暂停记录与恢复（2026-11-03）
+
+- 用户要求暂停时，最终镜像已完成 4 次自动循环，第 5 次已经启动。停止后续编排，单独采集第 5 次的显示和完整 dmesg，再确认回 Android；恢复时原进程已退出，`sys.boot_completed=1`、槽位 `_b`、原 boot_b SHA-256 正确。第 5 次证据：`handoff-final/pause-current-{display,dmesg}.txt`、`pause-current-validation.json`。
+- 最终版当前 5/5 通过：DSI IRQ 122/122、首次面板 prepare、SMMU context fault/DCS/vblank 错误均为 0。早期 PLL lock failed 4 次和 probe defer 仍存在，未随黑屏修复消失；不能把它们直接当成黑屏根因。
+- 已确认 SM8750 MDSS 缺失默认 identity 域匹配会导致早期固件 framebuffer 地址访问 fault；仅补此项、或只停止 INTF timing，都仍出现新 paging 域访问旧 framebuffer 的 fault 和随后 DCS 超时。当前最强证据支持：切换 KMS 页表前还必须清退固件遗留 CTL 取数路径。完整清退候选 smmu3 3/3、最终无重试版目前 5/5 通过，仍待完成回归，不能宣称所有冷启动场景已根治。
+- 用户要求继续后，执行剩余 5 次相同最终镜像回归，使用新目录 `handoff-final/resume-runs/` 保存，避免覆盖暂停前的日志；本轮局部候选总上限仍为 20 次。
+- 已离线准备完整 USB/rootfs 使用的 `armada13/read-boot.img`，SHA-256 `e297217883181d4c26b5720337c8e7df693b0c0c313db7d1132a4f4831651ed9`；kernel EFI 与最终探针一致。相比 armada12，ESP 仅替换 kernel，菜单默认 ColorOS；各 payload 逐字节核对通过，见 `armada13/offline-validation.json`。**此镜像尚未上机，不能把探针通过视作完整桌面验证。**
+- 工作树保留 1406 补丁、删除无效 1403 面板重试、series/provenance、观测脚本及主机 C helper 测试修改；尚未提交。未修改 kShimC，未固化双启动，未写平板分区。所有产物路径均相对 `output/opd2413-stage4/`。
+
+### 19.22 恢复测试结果：CTL 清退仍不足（2026-11-03）
+
+- 恢复后的第 1、2 次通过（最终候选累计第 6、7 次）；第 3 次，即最终候选第 8 次失败。最终统计 **7/8 通过、1/8 失败**，未完成原计划 10 次。自动脚本首次失败即停止，已返回 Android；再次只读确认 `sys.boot_completed=1`、`_b`、boot_b 原 SHA-256 不变。本轮局部候选累计 **18/20 次已用，剩余 2 次**。
+- 失败证据 `handoff-final/resume-runs/dmesg-03.txt`：1.323213 s 出现 SID `0x800`、IOVA `0xfc89bc00`、CB=8、FSR `0x402` 的 SMMU fault；1.523642 s DSI1 命令 DMA 超时，首条 DCS `ff 20` 返回 -110。两路 DSI IRQ 为 0/1，面板 prepare 未成功；ack 成功，Android 恢复与哈希复核通过。全部恢复轮记录在 `resume-runs/runs.jsonl`，总计数与最终设备核验见 `handoff-final/regression-summary.json`；当前无运行中的自动启动脚本。
+- **结论修正**：默认 identity 匹配消除了早期 fault，但 INTF 停机加 6CTL 清理/复位仍不能保证之后不访问旧 framebuffer。此前 smmu3 3/3 和最终版前 7 次成功不足以证明根治；19.21 中的“最强证据支持 CTL”仅为当时假设，现已被反例限制。仅凭 SID 和落在旧 framebuffer 的 IOVA，尚不能唯一确认请求来自哪条硬件路径。
+- 离线复核：当前 1406 只验证 INTF 状态与 CTL reset，不读取 VBIF outstanding/idle；因此不等价于总线请求已排空。现有 `dpu_hw_get_axi_halt_status()` 还会在 ACK 超时后因任一 AXI port idle 位置位返回成功，不能直接拿此返回值当作全部端口排空的证明。下一候选应先明确寄存器语义与真实请求来源。
+- 下一步先只读取证：比较 SSPP/VBIF 未完成请求、DSI video/command 启用与 fault 时间，确认 CTL reset 完成后是否还需要其他明确的硬件完成条件。不得追加固定延时、面板重试或屏蔽 IOMMU fault 来宣称修复。
+- 独立只读复核同意：SID 仅定位 MDSS，不能证明 CTL 来源。下一取证镜像应保存本轮首条 DMA 的实际 `DMA_BASE/LEN`，以及换域前后 SSPP 源地址、CTL active、VBIF 请求/确认状态；旧 diag1 的 DMA_BASE `0x5a000` 不能替代本轮快照。
+- `1406` 与 `handoff-final`、`armada13` 均保留为诊断候选，**不标记稳定，不部署，不提交为已修复**。完整桌面与断电冷启动验证仍未做。
+
+### 19.23 离线复盘：复位时 AXI 未 halt，旧读请求遗留在端口外侧（2026-11-03/04，候选 quiesce1 待上机）
+
+只用已保存的 40 份 dmesg 和寄存器快照复盘（`stress1–5/broadcast1/reset1/vid1/diag1/clkxfer1/smmu1–3/handoff-final`），未上机。
+
+- **1406 实际是空操作**：`msm_mdss_init()` → `msm_mdss_reset()` 在约 0.75 s 拉 `DISP_CC_MDSS_CORE_BCR` 20 ms，这时 ABL 的扫描输出还在读内存（DMA 域内核里每 8.33 ms 一次的早期 fault 证明 120 Hz 扫描一直跑到复位）。1406 在约 1.2 s 才执行，此时 INTF 早已停止：smmu2/smmu3/handoff-final 所有轮次都打印 `active mask=0x0`，CTL 也已被复位。1406 的 7/8 与基线（40 轮中 11 轮失败，约 27.5%）没有统计差异。
+- **失败轮次的旧读请求位置固定**：凡是 SMMU fault 未被限流的失败轮次（5/5：broadcast1#2、clkxfer1#3、smmu1#1、smmu2#3、handoff-final resume#3），都在换域之后出现**恰好一次** SID 0x800 读 fault，IOVA 为 `0xfc89ba00`/`0xfc89bc00`/`0xfc89d800`。按 3392×4 B 行宽计算，都落在旧帧缓冲第 46/47 行交界、ABL 4 个 848 px rect 各自的起始 1 KiB 内（ABL 拓扑 4 LM/4 DSC/2 INTF）。12 次 identity 域通过轮次没有一次 fault。
+- **fault 与首条 DCS 触发同时发生**：三次 fault→超时打印间隔为 200.43/200.75/200.82 ms，正好是 DSI 命令 DMA 等待（HZ=250）的长度；0.75 s 复位到首条 DCS 之间没有任何 MDSS 内存访问。diag1 失败轮次两路 `DMA_BASE` 都是正确的 `0x5a000`，fault 地址不是 DSI 自己的命令缓冲。
+- **读通路整体卡死**：首条命令只有 DSI1 卡住，DSI0 完成；但之后的所有命令（重试/下一条 DCS）**两路都** `STATUS0=0x20003`。这是共享 AXI 读通路被堵，不是 DSI1 单独的问题。
+- **同机已有同类结论**：erhai 内核 `c343837c7`/`2bb3a45c4`（本 tablet，同 SoC）记录 MDSS 在 VBIF AXI 端口未 halt 时掉电，之后首条 DSI 命令 DMA 永远取不到数据，症状逐字相同（两路 `CMD_MODE_DMA_BUSY`、FIFO 空、-110、黑到重启），且“用 BCR 复位整个 MDSS 也无效，坏状态在 AXI 端口外侧”。Armada 已带入其运行时挂起前的 AXI halt（`dpu_runtime_suspend()`，SM8750 `DPU_VBIF_AXI_HALT`），但**开机 `msm_mdss_reset()` 在扫描输出运行、AXI 未 halt 的情况下直接复位**，与掉电路径不对称。
+- **结论（待实机确认）**：黑屏的触发点是开机复位打断正在进行的 ABL 扫描输出，在 MDSS 复位域之外留下一个孤立读请求。首条 DSI 命令 DMA 把它带出，它在 KMS 新页表中 fault，同时堵住 MDSS 读通路。第 47 行为何固定尚未解释（推测与帧消隐期的预取深度有关），不影响修复方向。
+
+**候选 quiesce1（单变量，基于 handoff-final）**：仅在 `msm_mdss_reset()` 拉 BCR 之前、且 root 为 `oneplus,erhai`、MDSS 为 `qcom,sm8750-mdss` 时，按运行时掉电的量产顺序处理 ABL 管线。先停两路 DSI INTF（双缓冲，帧边界生效，等 `INTF_STATUS` 清零，上限 100 ms），再强制 VBIF 时钟、请求 AXI halt 并等 ACK（4 ms；无 ACK 时两个端口都 idle 才接受）。复位结束后再释放 halt。没有继承的扫描输出时不写任何寄存器；超时只报告，不阻止复位（与下游一致）。每次启动输出一行 `bootloader scanout: intf … axi halt … after reset …`，记录停机耗时、行/帧计数、ACK 和复位后的 halt 寄存器，因此通过轮也能提供数据。不加延时、重试或屏蔽 IOMMU fault；1406 及 identity 默认域保持不变。
+
+- 离线：`msm_mdss.o` 以 `W=1` 编译无警告，`vmlinuz.efi` 编译 0 警告；主机寄存器模型 `linux/test_mdss_boot_handoff.py --kernel-source <源码>` 直接抽取内核函数，6 个场景通过（无继承扫描时零写入、两路先发停止再等待、AXI halt 只在停机等待之后且时钟已强制、超时正确传播、复位之后才释放）。两个变异反例（halt 提前、忽略 INTF 超时）都被测出。ESP 与 handoff-final 相比仅 `vmlinuz.efi` 不同（initramfs `4265cb5f…`、DT、loader、kShimC/U-Boot 均相同），4 份负载解包比对一致。
+- 产物：`quiesce1/read-boot.img` SHA-256 `6f69c41d39d6dfafc5b567b30494596e52fd75d5811f112500e080b8c1c41d72`，kernel EFI `282ec507824e1f3493fefed1a7b4b6f73b0c6329e90d975c743c1354a9b0ca82`；源码差异 `quiesce1/candidate.diff`，修改前文件 `quiesce1/before-msm_mdss.c`。压力脚本新增 `boot_handoff` 字段（只解析 dmesg）。
+- **上机判据**：每轮与以往相同（首次 prepare 成功、DSI IRQ 122/122、DCS/vblank 错误 0、SMMU fault 0），另外要求 `intf 0x3 stopped 0x3` 且 `axi halt ack`。连续 20 轮全部通过才算有效（基线失败率 27.5% 时，偶然连过 20 轮的概率约 0.16%）。首次失败即停止，并按失败轮的报告行判断：
+  - `no-ack` 或停机不完整：排空没有完成，查端口为何一直忙。
+  - ACK 正常但仍有第 47 行 fault：孤立请求早于 0.75 s，下一个嫌疑是 0.665 s SMMU 复位到 0.704 s identity attach 之间 SID 0x800 失配的窗口。
+  - 无 fault 但仍卡住：属于另一种机制。
+- 需要用户重新授权临时启动次数（上一轮授权剩余 2 次，不够做统计）。仍只用 `fastboot boot`，不刷写、不切槽。
+
+### 19.24 quiesce1 第 1 轮失败；改为先复位 CTL 再 halt（quiesce2，2026-11-04）
+
+- 用户授权本轮 20 次 `fastboot boot`（首次失败即停）。开始前 b 槽、boot_b `0e5afd65…`、电量 100%、29.6 °C。**quiesce1 第 1 轮即失败**，自动回到 Android，复核槽位/哈希不变。本轮已用 1/20。证据 `quiesce1/runs/`、`quiesce1/stress-host.log`。
+- 报告行：`intf 0x3 stopped 0x3 in 656 us (cfg 80800000/80800000 line 2458/2460 frame 6993/6993), axi halt no-ack 00000030 in 4011 us, after reset 00000000/00000000`。随后 1.495 s 出现 SID 0x800 读 fault，IOVA `0xfc89d800`（第 47 行，与 clkxfer1#3 相同）；1.696 s DSI1 超时，首条 `ff 20` 返回 -110。
+- 解读：
+  - INTF 在帧边界停下（656 µs，约 209 行，正好到帧尾）。`INTF_CONFIG` bit31 表明 ABL 开启了 programmable fetch，停下时下一帧的预取已经开始。
+  - AXI halt **一直没有 ACK**，只有两个端口显示 idle。quiesce1 采用了 erhai 的回退判定（端口 idle 即算成功），因此没有报警。
+  - 复位后 VBIF halt 寄存器为 0，说明 VBIF 寄存器被 BCR 复位了，但第 47 行的请求仍然存活。
+  - 在帧边界停 INTF 会**确定性地**把 SSPP 留在"下一帧已预取、第 47 行请求挂起"的状态。quiesce1 很可能把约 27% 的概率性故障变成了必然故障。
+- 主线与下游关显示的标准顺序（`dpu_encoder_helper_phys_cleanup()`）是：INTF 停下后，**趁 CTL 仍拥有这些 pipe 时先 `ctl->ops.reset()`**，再清 mixer 等。1406 把顺序做反了（先清关联再复位），而且是在 BCR 之后；erhai 的掉电 halt 能拿到 ACK，是因为 DRM 之前已经做过这一步。
+- **quiesce2（单变量，相对 quiesce1）**：停 INTF → 复位 ABL 拥有扫描输出的 CTL（看 `CTL_INTF/FETCH_PIPE/PIPE_ACTIVE`，都没有时复位全部 6 个；软复位 2 ms 未完成再走 override，与 `dpu_hw_ctl_reset_control()` 一致）→ AXI halt，**必须 ACK**，不再接受 idle 回退 → BCR → 释放。报告行增加 prog fetch 起点、CTL 掩码、复位方式和耗时、复位前后 SSPP 是否残留（`SRC_SIZE/SRC0_ADDR`），用来判断 BCR 是否会清掉 pipe 状态。
+- 离线：`W=1` 无警告，`vmlinuz.efi` 0 警告；寄存器模型扩展到 9 个场景并全部通过（含 override、override 失败、无 CTL 认领时全部复位、ACK 严格要求、SSPP 残留记录）；三个变异反例（CTL 复位提前、halt 提前、退回 idle 回退）都被测出。ESP 与 handoff-final 相比仍只有内核不同。镜像 `quiesce2/read-boot.img` `2686192103ed5a1b03e3903d0627967e2c0dcec8f490d2d93e157a9c8b4d587b`，kernel `77e4a3c4c7438db90689dc6ad1b9bc782323e81eb29de491e98b44a90696f5be`，差异 `quiesce2/candidate.diff`。
+- 判据：每轮在原有判据之外，要求 `ctl … reset soft|forced` 且 `axi halt ack`。连续通过才算有效，首次失败即停，并按报告行分流：
+  - ACK 仍拿不到：挂起的请求不在 CTL 的复位范围内。
+  - ACK 正常但仍有 fault：请求在 AXI 端口之外，嫌疑转向 0.665–0.704 s 的 SMMU 失配窗口。
+  - 复位后 SSPP 仍残留：说明 BCR 不复位 pipe，需要另行清除。
+- **quiesce2 第 1 轮内核崩溃**（本轮授权已用 2/20）：探针没有应答，30 s 后 panic 重启回到 Android，槽位/哈希不变。Android pstore 里留下 Linux `console-ramoops-0`（`quiesce2/runs/pstore-01-console-ramoops-0`，有已知的位损坏），在 **0.783 s** 停于 `Internal error: synchronous external abort`（ESR 约 `0x96000010`，读访问）。按 quiesce1 的时序推算，复位前的步骤约在 0.758 s 前结束，0.78 s 前后撤销复位，因此 abort 落在复位刚结束后的 `mdss_boot_release_hw()` 里。那里比 quiesce1 只多了一项：复位后读 SSPP 寄存器（quiesce1 复位后只读 VBIF，没有问题）。如果 abort 发生在复位前的 SSPP 扫描或 CTL 复位，时间会早 25 ms 以上。**结论：BCR 撤销后，MDP 子模块不能立即访问，VBIF 可以。** 复位后的 SSPP 残留诊断因此改不了，不能这样做。
+- **quiesce2b**：只删除复位后的 SSPP 读取，停机、CTL 复位和 ACK 判据不变。寄存器模型新增约束"复位后不得访问 MDP"，这个约束能抓到 quiesce2 的这个 bug，quiesce2b 通过。镜像 `quiesce2b/read-boot.img` `571c06cdb6b90a2567a60f365e2ea886be73de1e6cbb3020dd5dce8ac4212e55`，kernel `cb3da8b8d3bf7d21c7aed19110255ed6d270e3d303f6aa1f41d254f8fe5a518c`，相对 quiesce2 的差异 `quiesce2b/delta-from-quiesce2.diff`（53 行）。使用本轮剩余的 18 次授权，判据同上。
+
+### 19.25 quiesce2b：AXI ACK 与显示结果逐轮对应；改为先关 programmable fetch（quiesce3，2026-11-04）
+
+- quiesce2b 第 1 轮**通过**：`ctl 0x1 reset soft in 3 us, axi halt ack 00000031 in 1 us`，面板首次 prepare 成功，DSI IRQ 122/122，没有 SMMU fault。第 2 轮**失败**：CTL_0 软复位同样 3 µs 完成，但 `axi halt no-ack 00000030 in 4005 us`，1.483 s 出现第 47 行 fault（`0xfc89be00`），DCS 超时。脚本停止并回到 Android，槽位/哈希不变。本轮授权已用 4/20。证据 `quiesce2b/runs/`。
+- 报告行确认 ABL 使用 **CTL_0 和 VIG0–3** 四个 pipe（`sspp 0xf`，VIG0 `SRC0=0xfc800000`）。`PROG_FETCH_START=0x1c9b09` 按 `(vtotal−L)×htotal+1` 解出 htotal=712、L=25，即帧尾前 25 行开始预取下一帧。
+- 目前 3/3 逐轮对应：AXI halt 有 ACK 就通过，没有 ACK 就失败（quiesce1#1 无 ACK、quiesce2b#1 有 ACK、quiesce2b#2 无 ACK）。**能否排空是决定因素**；CTL 软复位只是有时能撤掉挂起的预取。#1 检测到 INTF 停止约在帧尾后 60 行，#2 约在 146 行，推测预取仍在进行时复位能干净中止，等预取填满、请求挂起后再复位就撤不掉了（推测，未证实）。
+- **quiesce3（单变量，相对 quiesce2b）**：在停 timing engine 之前，先清两路 `INTF_CONFIG` bit31（programmable fetch），通过认领扫描输出的 CTL 写 `CTL_INTF_FLUSH=BIT(1)|BIT(2)` 和 `CTL_FLUSH=BIT(31)`（与 encoder enable 下发 INTF 配置的方式相同），等 `CTL_FLUSH` 被下一帧消费（上限 100 ms）。新帧不再预取下一帧之后，才停 timing engine → CTL 复位 → AXI halt 并要求 ACK → BCR。没有 CTL 认领时不 flush，flush 超时会上报。报告行增加 `prog fetch off <mask> in <us>`。预期：每轮都能 ACK。
+- 离线：`W=1` 无警告，`vmlinuz.efi` 0 警告；模型扩展到 10 个场景并全部通过（只清 bit31、只通过认领的 CTL flush、flush 被消费后才停、prog fetch 已关时不 flush、无 CTL 认领时不 flush、flush 超时上报）；三个新变异反例都被测出。ESP 与 handoff-final 相比只有内核不同。镜像 `quiesce3/read-boot.img` `4554e8c121cbf6a08f125235ba875bf17363a9b4e89ba78075126c507b1fa123`，kernel `aff4d7823140101e4269ce07aa0b3f88fd109f472e1467b76870a836e003ab66`，相对 quiesce2b 的差异 `quiesce3/delta-from-quiesce2b.diff`。
+
+### 19.26 quiesce3 16/16 通过：开机黑屏根因确认并修复（2026-11-04）
+
+- 用户同意用本轮剩余 16 次测试 quiesce3。**16/16 全部通过**：每轮面板首次 prepare 成功，DSI IRQ 122/122，DCS/vblank 错误 0，SMMU fault 0（完整 dmesg 含用户态标记）。每轮报告行都是 `prog fetch off 0x3 … stopped 0x3 in ≈8.4 ms, ctl 0x1 reset soft in 2–3 us, axi halt ack 00000031 in 0–1 us`。开始时的扫描行覆盖 284–2635，即一帧中的各个位置。第 5 轮起始于 2635 行，已越过预取起点，flush 等了一整帧才生效，之后同样拿到 ACK。本轮授权 20/20 已用完；每轮都回到 Android，最后复核 `_b`、unlocked、boot_b `0e5afd65…`、电量 100%。证据 `quiesce3/runs/`（`runs.jsonl`、16 份 dmesg/display）。
+- 统计：基线失败率 11/40，偶然连续通过 16 轮的概率约 0.58%。本会话所有带诊断的 19 轮里，AXI ACK 与结果一一对应：有 ACK 的 17 轮全部通过，无 ACK 的 2 轮全部黑屏。
+- **根因（已确认）**：ABL 交接时，CTL_0 与 VIG0–3 仍在扫描输出，并开启了 programmable fetch（帧尾前 25 行开始预取下一帧）。`msm_mdss_init()` 直接拉 MDSS core BCR，pipe 已经发出的下一帧预取（第 46/47 行交界）残留在复位之外。KMS 换成新页表后，第一次 MDSS 总线事务（首条 DSI 命令 DMA）把它放出，它 fault 后堵住 MDSS 读通路，两路 DSI DMA 永久 busy，导致黑屏。只要复位前 VBIF AXI 能拿到 ACK（说明总线已排空），就不会出现这个问题。
+- **修复（1407）**：BCR 之前依次：通过 CTL INTF flush 关掉 programmable fetch，等新帧生效 → 停 DSI timing engine → CTL 复位 → VBIF AXI halt 并要求 ACK → BCR；复位后只碰 VBIF 释放 halt。补丁已放入 series（`1407-drm-msm-mdss-retire-opd2413-boot-scanout-before-reset.patch`，紧接 1406），PATCHES.md 已登记，1406 的说明也已更正。干净的 7.2.6 按 series 应用 300 个补丁全部零 fuzz，hunk 数逐个核对；`drivers/gpu/drm/msm`、`arm-smmu`、`panel` 与实测源码逐字节一致。checkpatch 仅剩日志参数宏一条误报。寄存器模型 `linux/test_mdss_boot_handoff.py` 10 个场景通过，8 个变异反例都被测出。仍未提交。
+- 1406 中 DPU 侧的 INTF 停机和 CTL 清理在复位之后执行，实际上什么也不做，只是因为与实测配置一致才保留。identity 默认域条目是必要的。以后如果要精简 1406，需要另做回归。
 
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 
