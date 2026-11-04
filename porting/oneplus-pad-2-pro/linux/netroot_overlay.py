@@ -11,7 +11,8 @@ writable tmpfs layer. It never touches the read-only image itself:
 * forwards the journal to kmsg, so the ACM log carries userspace messages;
 * serves read-only status pages at http://10.231.0.1/ with a static busybox;
 * records a digest-checked state into pmsg and reboots back to Android after
-  --return-after seconds, or when the host connects to port 5009.
+  --return-after seconds, or when the host connects to port 5009;
+* disables suspend and hibernation, which hang this port so far.
 """
 import argparse
 import hashlib
@@ -153,6 +154,16 @@ WANTS = {
 }
 
 
+NO_SUSPEND = '''# OPD2413 test system: suspend/resume is not validated on this port yet and
+# an idle suspend hangs the tablet. Keep it awake until that is fixed.
+[Sleep]
+AllowSuspend=no
+AllowHibernation=no
+AllowHybridSleep=no
+AllowSuspendThenHibernate=no
+'''
+
+
 DEBUG_SHELL_UNIT = '''[Unit]
 Description=OPD2413 test: root shell on the NCM link only (opd_shell.py)
 After=opd-httpd.service
@@ -250,6 +261,9 @@ def main():
     nm = etc / 'NetworkManager/conf.d'
     nm.mkdir(parents=True)
     (nm / '90-opd-ncm.conf').write_text(f'[keyfile]\nunmanaged-devices=mac:{DEVICE_MAC}\n')
+    sleep = etc / 'systemd/sleep.conf.d'
+    sleep.mkdir(parents=True)
+    (sleep / '90-opd-no-suspend.conf').write_text(NO_SUSPEND)
     journald = etc / 'systemd/journald.conf.d'
     journald.mkdir(parents=True)
     (journald / '90-opd.conf').write_text('[Journal]\nForwardToKMsg=yes\nMaxLevelKMsg=info\nStorage=volatile\n')

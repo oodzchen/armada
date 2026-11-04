@@ -1,6 +1,6 @@
 # 一加平板 2 Pro（SM8750）Android / Armada 双启动方案
 
-> 状态（2026-11-04）：完整 Armada 已通过临时启动从 USB 进入桌面和游戏模式。显示黑屏修复 1406/1407 已提交（`98f8101`），临时启动 16/16 通过；桌面网页音频、音量和静音已由用户确认正常，六路350增益也已试听通过（§19.38）。音频内核 1408、拓扑、UCM、固件输入检查及 initramfs 收录已接入源码构建（§19.31）；平板无内置手柄导致的服务误报已修复，系统恢复 `running`、失败单元为 0（§19.32）。armada18 已冷启动，但包含最新权限/增益修正的独立镜像及全新可写层仍待验证。Android 保留，尚未固化双启动。
+> 状态（2026-11-04）：完整 Armada 已通过临时启动从 USB 进入桌面和游戏模式。显示黑屏修复 1406/1407 已提交（`98f8101`），临时启动 16/16 通过；桌面网页音频、音量和静音已由用户确认正常，六路350增益也已试听通过（§19.38）。音频内核 1408、拓扑、UCM、固件输入检查及 initramfs 收录已接入源码构建（§19.31）；平板无内置手柄导致的服务误报已修复，系统恢复 `running`、失败单元为 0（§19.32）。armada19 独立镜像（`1768f477…`，自身包含权限与350增益）已通过全新可写层首启/再启及原配置启动验收（§19.39）。kShimC 已写入 `boot_b`（`9d91e3a9…`，保留 AVB vbmeta），开机先出菜单、默认 ColorOS，Armada 仍从 U 盘运行，不再需要电脑 fastboot。
 > 本文中标注 **【待验证】** 的内容尚未在实机上确认，不能当作事实使用。
 > **继续工作时先读第 21 节（最新验收、测试清单与机内双启动缺口），实现证据见 19.30–19.38，显示问题再读 19.23–19.28。** 第 17、18、20 节及更早测试清单包含历史状态；其中旧“下一步”、补丁计数和未实现状态不代表当前进度。不要从已完成的 UFS NOP、EFI、erhai 点屏或 Armada 触控测试重新开始。
 
@@ -9,16 +9,16 @@
 | 阶段 | 当前状态 | 仍需完成 |
 |---|---|---|
 | 一：采集与备份 | 检查点已通过 | 后续每轮继续核对原镜像与当前槽位 |
-| 二：kShimC 与 Android | 检查点已通过；音量切换、电源确认、默认启动 ColorOS 正常 | 最终镜像形成后还需长期回归 |
+| 二：kShimC 与 Android | 检查点已通过；kShimC 已写入 `boot_b`，从闪存启动的菜单/ColorOS 正常（§19.39） | 长期回归；每次换 Armada 启动文件需重写 `boot_b` |
 | 三：U-Boot 可行性 | 基本通过：显示、内存、返回 Android、UFS 唤醒/只读/恢复、6 个 LUN 主备 GPT（66/66）、只读块设备上的 FAT16/ext4（4/4 CRC 一致）、EFI loader（ABL 交接内存保留并 CRC 校验）、systemd-boot 菜单（音量/电源键只读输入，Reboot 经 EFI 复位钩子返回 Android）、ESP 作为 kShimC Blob、ExitBootServices 时恢复 UFS | ESP/根文件系统的最终位置；UFS 上的 ESP 需要写入许可 |
 | 四：Armada 设备移植与 USB 试启动 | 完整系统已进入桌面/游戏模式；显示、触控、磁吸键盘、触控板、Wi-Fi 和桌面音频已实测。配套内核/1594 模块及 USB 持久层工作；1408 音频源码、拓扑和 UCM 已纳入构建，服务失败项已清零 | 完整新镜像/全新可写层冷启动；逐颗扬声器、麦克风增益和开机 APM 超时；挂起恢复与长期稳定性 |
-| 五：安装与固化双启动 | 未开始；仍使用临时启动镜像 | 确定系统存放位置、最终 boot 镜像、升级/恢复方案及多轮双系统启动回归 |
+| 五：安装与固化双启动 | 部分：kShimC 菜单已固化到 `boot_b`，但 Linux 启动文件仍内嵌在 boot、根文件系统仍在 U 盘 | 内部 ESP/根/数据布局、最终 boot（不再内嵌 ESP）、升级/恢复方案及多轮双系统启动回归 |
 
-**下一项工作**：重出同时包含脚本执行权限与本轮350/-2.5 dB音频配置的独立镜像，另做全新可写层验收。六路功放已按用户决定对齐参考项目，DSP保持8192，源码、运行中部署及用户试听均通过（§19.38）。armada18 已通过首次完整校验进入桌面，新校验记录匹配，后续同镜像可跳过全盘读取；用户已确认网页音频/音量/静音正常。机内双启动的关键缺口和完整剩余清单见第21节。
+**下一项工作**：Linux 内部 UFS 只读候选（§21.2 第 2 项）。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
 
 **剩余工作量**主要在：从源码完整重建新镜像并完成全新可写层/冷启动回归、其余外设和休眠稳定性、内部存储与 ESP 布局、双启动固化及升级/恢复方案。桌面/游戏模式、USB 根文件系统和 Wi-Fi 已有实测记录，不再列为尚未启动。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
 
-**原 Android 基线状态**（2026-11-03；本轮每次返回复核槽位和 boot 哈希）：ColorOS 正常启动，b 槽，`boot_b` SHA-256 仍为 `0e5afd65d6c92bb12c3a319ddcbcfc9ffaac6a68e22c567c4a6ef1cf82705e49`；用户确认解锁、指纹、Wi-Fi、KernelSU/susfs 全部正常。所有实验均为 `fastboot boot` 临时启动，未刷写分区、未改 GPT、未格式化、未刷 OEM ABL；Linux 冒烟 DT 禁用 UFS/PHY，块设备仅 loop0–7。普通重启仍进入原有 Android，尚未固化 kShim 菜单。按本轮用户“更新文档，然后提交”的要求，本方案进度与源码一并提交；原始记录和私有固件仍保留本地。
+**Android 基线状态**（2026-11-04 起 `boot_b` 为 kShimC 镜像 `9d91e3a9666c9886a761a88401b1b760bd7bdeaeed4a19f54615796dfc30a055`，其中 ColorOS 内核与原 WildKernel 逐字节相同；原镜像 `0e5afd65…` 备份于 `~/oneplus-pad2pro-backup/slot_b/boot_b.img`，恢复用 `fastboot flash boot_b` 该文件，见 §19.39。以下为 2026-11-03 的历史记录）：ColorOS 正常启动，b 槽，`boot_b` SHA-256 当时为 `0e5afd65d6c92bb12c3a319ddcbcfc9ffaac6a68e22c567c4a6ef1cf82705e49`；用户确认解锁、指纹、Wi-Fi、KernelSU/susfs 全部正常。所有实验均为 `fastboot boot` 临时启动，未刷写分区、未改 GPT、未格式化、未刷 OEM ABL；Linux 冒烟 DT 禁用 UFS/PHY，块设备仅 loop0–7。普通重启仍进入原有 Android，尚未固化 kShim 菜单。按本轮用户“更新文档，然后提交”的要求，本方案进度与源码一并提交；原始记录和私有固件仍保留本地。
 
 ---
 
@@ -880,7 +880,7 @@ CRC verified; 0 bytes recovered relative to first replica
 
 ### 18.5 安全规则（持续有效）
 
-不刷 `abl_a/abl_b`（OEM 熔断，OpenABL 会变砖，不运行 `flash_abl.sh`）；不重新上锁；不写 `persist`、`nonmodemst*`、`modem`、`xbl*`、`abl*`；不改 vbmeta、分区、GPT、文件系统，不格式化 userdata；只用 `fastboot boot`，不刷 `boot_b`，不切换到 a 槽；sudo 改用 `pkexec`；构建保留一个 CPU 核（`-j15`）；每次上机前由用户确认，结束后核对 `boot_b` 哈希与 Android 功能；不提交设备标识、本文档、`packages/openabl-updater/README.md` 与对话记录。
+不刷 `abl_a/abl_b`（OEM 熔断，OpenABL 会变砖，不运行 `flash_abl.sh`）；不重新上锁；不写 `persist`、`nonmodemst*`、`modem`、`xbl*`、`abl*`；不改 vbmeta、分区、GPT、文件系统，不格式化 userdata；不切换到 a 槽；`boot_b` 只写入用户确认过的 kShimC 整分区镜像（2026-11-04 用户批准，必须保留 AVB vbmeta 与 footer，见 §19.39），其他启动分区仍只用 `fastboot boot`；sudo 改用 `pkexec`；构建保留一个 CPU 核（`-j15`）；每次上机前由用户确认，结束后核对 `boot_b` 哈希与 Android 功能；不提交设备标识、本文档、`packages/openabl-updater/README.md` 与对话记录。
 
 ### 18.6 Armada 内核移植的起点
 
@@ -1286,6 +1286,20 @@ CRC verified; 0 bytes recovered relative to first replica
 - **用户验收与复核**：用户随后确认新音量“可以了”。再次只读检查六路仍为350、系统 `running`、failed units=0。新音量听感验收通过；证据仍以原部署日志及用户反馈为准，不把本轮扩大为长期满音量/热/机械测试。
 - **状态与下一步**：源码、运行中配置和用户试听验收通过，新镜像冷启动仍待验证。设备在 armada18 桌面、Wi-Fi可调试、无失败服务，当前无阻塞。下一步重建包含权限及350增益的独立镜像，再做全新可写层验收；原厂保护/调音仍在统一技术债表中。完整交接见第21节。
 
+### 19.39 armada19：独立镜像、全新可写层与 kShimC 写入 boot_b（2026-11-04）
+
+- **镜像**：源码 `fb483bf`，在固定 Plasma 6.7.5 基础层 `3af72886…` 上按 20/41/52/55 步骤构建，内核包与 armada18 同为 `2fc21ced…`（e05c455 之后内核/`build_files` 未变）；构建只检查脚本权限而不再 chmod，47 个脚本均为 0755。镜像 `8c851151…`，`root.squashfs` 7084253184 字节、SHA-256 `1768f47742a3529e7de9ade61a83e2a9a6ca470a47c2f11ce6fd87f0e0ebc24c`，版本 `20261104.fb483bf.usb2`。镜像内 Speaker.conf `ba1185f1…`、HiFi.conf、拓扑与私有触控/GPU zap 固件哈希均核对。产物 `output/opd2413-stage4/armada19/`（`README-TEST.md`、`SHA256SUMS`、`deployment.json`）。
+- **启动脚本改动（源码）**：`smoke_initramfs.py` 新增 `opd.layer=NAME`，可写层改为 `opd/layers/NAME/{upper,work}`，名字仅允许 `[A-Za-z0-9_-]`，默认 `opd/upper` 不变；读取 cmdline 改用 shell 内建 `read`。`netroot_overlay.py` 的测试默认文件加入 `90-opd-no-suspend.conf`（与旧 upper 中文件同为 `77d7be49…`），否则全新可写层会允许已知会死机的挂起。这是测试临时措施，产品级挂起方案（Armada fake suspend 或修复 s2idle）仍待做。`tests/usbroot-preserve-config-test.sh` 覆盖层选择/拒绝非法名，并可用 `USBROOT_TEST_SH` 以平板 BusyBox 运行，两种 shell 均通过；shellcheck 通过。
+- **boot**：`read-boot.img` `fbfe51c0…`（94.8 MiB）相对 armada18 只改 initramfs 的 `/init` 与新增的禁止挂起文件，内核/DTB/U-Boot/kShimC/ColorOS 基础内核逐字节相同；systemd-boot 新增 `DESKTOP - FRESH test layer`（`opd.layer=fresh19`），原桌面项改名 `DESKTOP mode - your settings`。
+- **U 盘更新**：`run-update.sh` 一次 pkexec 完成 e2fsck -fn（前后均干净）、只读挂载、upper 完整备份（`usb-backup-20261104-133730/upper.tar`，`3099fef1…`）、暂存并回读新 root、73019 项 upper 三次比对不变，旧 root `a64e67aa…` 硬链接保留在 U 盘 `opd/backups/20261104-133730/`。
+- **全新可写层**：首启完整校验后进入桌面（屏幕停在 `checking image SHA-256...` 数分钟属正常）；`running`、失败单元 0，controller-type/installer-visibility 返回 0；六路自动为 350，Speakers/Internal microphones 自动出现，用户确认网页声音、音量、静音正常；fresh19 upper 中没有 `usr/libexec`、`usr/share`，即权限与 UCM 修复来自镜像本身（`fresh-validation.txt`）。再次启动跳过完整校验（内核 55 s 已进桌面），Wi-Fi 与音量持久（`fresh-reboot-validation.txt`）。
+- **原配置**：`your settings` 项进入用户原桌面，Steam 数据（6.0 GB）、Wi-Fi、音量保留，`running`、失败单元 0。upper 中 29 个覆盖文件里与镜像重叠的脚本/UCM/拓扑/固件全部与新镜像逐字节相同，其余为测试单元、与源码相同的设备配置/ACF 和未被引用的旧 `DisplayPort.conf`（`settings-validation.txt`、`upper-overrides.txt`）。
+- **USB 3**：平板端插头翻转 180° 后 U 盘为 5000 Mbps，原方向 480 Mbps，再次确认 §19.12 的方向问题。
+- **kShimC 写入 boot_b（用户批准）**：第一次直接 `fastboot flash boot_b read-boot.img` 后停在 fastboot START，b 槽 retry 6→5（ABL 尝试过启动）。原因：`boot` 是 AVB 链式分区，`boot_b` 末尾保留原厂 footer，指向偏移 38338560 的 boot vbmeta（2368 字节）；94.8 MiB 镜像覆盖了它，ABL 读到无效 vbmeta 拒绝启动。`fastboot boot` 不经过分区 footer，故临时启动一直正常。已用备份刷回 `0e5afd65…` 恢复，Android 正常（`attempt1/`）。修正：`read-boot-flash.img` 为整分区镜像（`9d91e3a9…`），前部为原 boot 镜像，原 vbmeta 原样放在 99401728，footer 改写为新偏移/大小。刷入后出现 kShimC 菜单，ColorOS 正常，整分区回读哈希一致，用户确认 Android 功能正常；之后从 Android 重启选择 Armada 无需电脑（`boot-b-flash.json`）。a 槽 `slot-unbootable=yes`，ABL 不会回落到 a 槽。**任何写入 `boot_b` 的镜像都必须做同样的 vbmeta 迁移**；即使最终 boot 只含 ColorOS 内核+kShimC+U-Boot（约 41 MiB）也超过 38.3 MB。
+- **boot 大小**：ColorOS 内核 36.6 MiB、kShimC 4 MiB、U-Boot 0.5 MiB、内嵌 ESP 53 MiB（Armada 内核 20.9 MiB、initramfs 23 MiB，其中 41 MB 未压缩为早期 USB 所需 ADSP/SOCCP 固件，另有 8.4 MiB FAT 空闲）。下次重出镜像时缩小 ESP；彻底缩小依赖内部 ESP（§21.2）。
+- **其它观察**：`qcom-iris` 视频固件加载失败（armada17 起已有）、开机一次 APM CMD 超时、一次 GMU fenced write 延迟、powerdevil ddcutil 无 i2c 权限，均不影响本轮验收。
+- **状态**：设备在 armada19（原配置）桌面，Wi-Fi 可调试，U 盘留在平板上。每次换 Armada 启动文件（内核/initramfs/root 哈希）都需要重写 `boot_b`，可在 Android 中用 root 写入并回读，无需电脑。
+
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 
 | 内容 | 位置 |
@@ -1380,11 +1394,11 @@ python3 porting/oneplus-pad-2-pro/linux/decode_smoke.py \
 
 | 顺序 | 当前基础与缺口 | 完成标准 |
 |---|---|---|
-| 1. 最新独立镜像 | 内核/模块、固件、拓扑和UCM已有源码构建输入；当前只读镜像还未包含最新权限和350增益 | 从记录的源码/私有输入重建，隔离现有upper，以全新可写层冷启动；设备自动识别、声音/音量/静音和服务均通过，再测旧配置升级保留 |
+| 1. 最新独立镜像（§19.39 已通过） | armada19 在固定基础层上从源码输入构建，全新可写层首启/再启和旧配置启动均通过；尚未从零（含基础层）完整重建 | 后续基础层更新时按同一判据从零重建验收 |
 | 2. Linux内部UFS | U-Boot已完成只读LUN/GPT/文件系统读取；当前Linux DT仍主动禁用UFS/PHY，不能据此认定Linux内部存储可用 | USB根保持不变，先用单独候选启用Linux UFS，只读核对6个LUN、4KiB逻辑扇区、容量/GPT及选定数据哈希，核查I/O/SMMU错误，回Android验证；之后才对专用Linux空间做写入/持久性测试 |
 | 3. 内部空间与安装方案 | 尚无Armada机内ESP/root/data空间；userdata占据所在LUN尾部。通用 `armada-installer` 首装会重建/缩小userdata并清除Android用户数据，不能直接沿用 | 给出本机具体布局、容量、备份/数据迁移和恢复方案，逐分区列明写入范围。保留Android系统与保留Android现有数据分别验收；目前没有通过验证的无损安装方案 |
 | 4. 正式根部署与机内启动文件 | 当前USB squashfs+overlay不满足现有安装器要求的booted OSTree源；早期initramfs还按USB标签找根，ESP/内核/initramfs目前打包进临时boot | 形成可安装且可更新回滚的内部部署；initramfs按稳定UUID/PARTUUID挂载内部根与持久数据；U-Boot从机内ESP加载匹配内核/initramfs/DTB，不再等待USB。先保留fastboot临时启动进行验证 |
-| 5. 固化kShimC | 菜单与Android/Linux选择已通过临时boot验证，尚未写入当前活动槽位boot | 使用与当前Android匹配的最终boot，先临时启动核对两项；最后按明确写入范围固化当前槽位，不替换OEM ABL。拔U盘和电脑，冷开机至少10轮覆盖两系统选择、默认Android及失败恢复 |
+| 5. 固化kShimC | 已写入 `boot_b`（§19.39，保留 AVB vbmeta），菜单/ColorOS/Armada 均可从闪存启动；当前 boot 仍内嵌 ESP | 使用与当前Android匹配的最终boot，先临时启动核对两项；最后按明确写入范围固化当前槽位，不替换OEM ABL。拔U盘和电脑，冷开机至少10轮覆盖两系统选择、默认Android及失败恢复 |
 | 6. 更新、回滚与恢复 | 已有EFI同步及bootc相关脚本，但未在本机正式内部部署上走通；Android OTA后kShimC及槽位维护未验证 | Armada内核/initramfs/DTB同步更新，失败可选旧部署；ColorOS升级/槽位变化后可恢复菜单且保留Android；原boot和分区表备份可核验，救援路径有实际演练 |
 
 当前临时boot约94.8MiB，已接近96MiB分区上限；最终方案优先从机内ESP加载可更新的Linux内核/initramfs/DTB，避免持续向boot内塞完整Linux启动文件。具体落地仍以本机测试为准。
@@ -1400,4 +1414,4 @@ python3 porting/oneplus-pad-2-pro/linux/decode_smoke.py \
 | USB与已知清理项 | USB 3方向切换、USB/Hub/充电组合；开机APM超时及1406无效teardown清理。USB 3不是最终机内根的前提，但其余接口使用仍需测试 |
 | Android回归与维护 | 两系统多轮冷启动/切换后，复查Android解锁、指纹、Wi-Fi、充电及既有KernelSU/susfs；核对预期boot内容和非目标分区未被更改，再验证更新与恢复 |
 
-**唯一下一步**：构建并验收包含权限修正与350增益的独立镜像，使用隔离的全新可写层且保留用户现有U盘配置。完成后进入Linux UFS只读候选；当前不进行内部介质写入或固化boot。设备仍在USB armada18桌面，用户已完成新增益试听，当前无外部阻塞。
+**唯一下一步**：Linux 内部 UFS 只读候选（§21.2 第 2 项），仍保持 USB 根不变、不写内部介质。独立镜像与全新可写层已验收、kShimC 已写入 `boot_b`（§19.39）；设备在 armada19 桌面，U 盘留在平板上，换启动文件时需按 §19.39 重写 `boot_b`。

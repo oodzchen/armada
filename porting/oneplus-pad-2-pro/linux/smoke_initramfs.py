@@ -174,13 +174,30 @@ usbroot() {
 	insmod /opd/overlay.ko || { say 'usbroot: overlay module failed'; umount /usb; return; }
 	mount -t squashfs -o ro,loop $img /lower || { say 'usbroot: squashfs mount failed'; umount /usb; return; }
 	# USB_LAYER_STATE_BEGIN
+	# opd.layer=NAME selects a separate writable layer under opd/layers/NAME,
+	# e.g. a fresh one for first-boot tests; the default opd/upper is untouched.
+	upper=/usb/opd/upper
+	work=/usb/opd/work
+	layer=
+	read -r cmdline < /proc/cmdline
+	for arg in $cmdline; do
+		case "$arg" in opd.layer=*) layer=${arg#opd.layer=} ;; esac
+	done
+	if [ -n "$layer" ]; then
+		case "$layer" in
+		*[!A-Za-z0-9_-]*) say "usbroot: invalid opd.layer=$layer"; umount /lower; umount /usb; return ;;
+		esac
+		upper=/usb/opd/layers/$layer/upper
+		work=/usb/opd/layers/$layer/work
+		say "usbroot: separate writable layer opd/layers/$layer"
+	fi
 	bootstrap_defaults=1
-	if [ -d /usb/opd/upper ] && [ -n "$(ls -A /usb/opd/upper)" ]; then
+	if [ -d "$upper" ] && [ -n "$(ls -A "$upper")" ]; then
 		bootstrap_defaults=0
 	fi
 	# USB_LAYER_STATE_END
-	mkdir -p /usb/opd/upper /usb/opd/work
-	mount -t overlay -o lowerdir=/lower,upperdir=/usb/opd/upper,workdir=/usb/opd/work overlay /sysroot || { say 'usbroot: overlay mount failed'; return; }
+	mkdir -p "$upper" "$work"
+	mount -t overlay -o lowerdir=/lower,upperdir="$upper",workdir="$work" overlay /sysroot || { say 'usbroot: overlay mount failed'; return; }
 	# BOOTSTRAP_DEFAULTS_BEGIN
 	# Existing installations also contain user deletions (overlay whiteouts).
 	# Leave their complete persistent layer intact, including deleted defaults.
