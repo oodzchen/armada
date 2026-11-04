@@ -1,0 +1,171 @@
+From: Armada contributors
+Subject: [PATCH] drm/msm: retire OPD2413 firmware fetch paths before IOMMU attach
+
+The OPD2413 boot path inherits a physical-address framebuffer. SM8750 MDSS
+is absent from the identity-domain client table, so the default DMA domain
+faults on that framebuffer before DRM can take over. Add the compatible to
+the existing display identity-domain handling; KMS still attaches its own
+paging domain afterwards.
+
+At that second handoff, an idle DSI timing interface does not mean the old
+CTL fetch configuration is retired. On this board a read of the original
+framebuffer can fault immediately before the first DSI command times out.
+Stop the bonded timing interfaces, clear the inherited CTL layer/fetch
+state with the existing teardown operations and complete each CTL reset
+before attaching the KMS page tables. Abort the handoff on a timeout.
+
+Create the hardware resource objects before this teardown on OPD2413 only.
+Keep the original initialization order on other boards and do not retain
+an identity domain for normal DRM rendering. The panel no longer needs the
+ineffective power-cycle retries introduced during diagnosis.
+
+The teardown follows the boot-data-path problem discussed by Bjorn
+Andersson and Dmitry Baryshkov, using the operations present in this tree.
+Link: https://lists.openwall.net/linux-kernel/2021/05/12/3502
+Link: https://lists.openwall.net/linux-kernel/2022/02/17/30
+---
+diff --git a/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c b/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
+@@ -425,6 +425,7 @@
+ 	{ .compatible = "qcom,sm6375-mdss" },
+ 	{ .compatible = "qcom,sm8150-mdss" },
+ 	{ .compatible = "qcom,sm8250-mdss" },
++	{ .compatible = "qcom,sm8750-mdss" },
+ 	{ .compatible = "qcom,x1e80100-mdss" },
+ 	{ }
+ };
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -12,6 +12,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/dma-buf.h>
+ #include <linux/of_irq.h>
++#include <linux/iopoll.h>
+ #include <linux/pm_opp.h>
+ 
+ #include <drm/drm_crtc.h>
+@@ -32,6 +33,7 @@
+ #include "dpu_encoder.h"
+ #include "dpu_formats.h"
+ #include "dpu_hw_vbif.h"
++#include "dpu_hw_ctl.h"
+ #include "dpu_kms.h"
+ #include "dpu_hw_dspp.h"
+ #include "dpu_plane.h"
+@@ -1169,6 +1171,81 @@
+ 	dpu_kms->base.vm = NULL;
+ }
+ 
++/* OPD2413 firmware leaves CTL fetch configuration after the MDSS reset. */
++static bool dpu_kms_needs_firmware_teardown(struct dpu_kms *dpu_kms)
++{
++	return of_machine_is_compatible("oneplus,erhai") &&
++		of_device_is_compatible(dpu_kms->pdev->dev.of_node,
++					"qcom,sm8750-dpu");
++}
++
++/* Stop inherited scanout before replacing the firmware's identity domain.
++ * The timing-enable write is double buffered: wait for the hardware status,
++ * rather than assuming the control register write has stopped memory reads.
++ */
++static int dpu_kms_stop_firmware_scanout(struct dpu_kms *dpu_kms)
++{
++	const struct dpu_mdss_cfg *cat = dpu_kms->catalog;
++	u32 status;
++	int i, ret;
++
++	if (!dpu_kms_needs_firmware_teardown(dpu_kms))
++		return 0;
++
++	/* Disable both bonded interfaces before waiting on either one. */
++	for (i = 0; i < cat->intf_count; i++) {
++		const struct dpu_intf_cfg *intf = &cat->intf[i];
++		void __iomem *base = dpu_kms->mmio + intf->base;
++
++		if (intf->type != INTF_DSI)
++			continue;
++		writel(0, base + 0x000); /* INTF_TIMING_ENGINE_EN */
++	}
++
++	for (i = 0; i < cat->intf_count; i++) {
++		const struct dpu_intf_cfg *intf = &cat->intf[i];
++		void __iomem *base = dpu_kms->mmio + intf->base;
++
++		if (intf->type != INTF_DSI)
++			continue;
++		ret = readl_poll_timeout(base + 0x26c, status, !(status & BIT(0)),
++					10, 100000);
++		if (ret) {
++			DRM_DEV_ERROR(&dpu_kms->pdev->dev,
++				      "firmware INTF%d did not stop: status=%#x\n",
++				      intf->id - INTF_0, status);
++			return ret;
++		}
++	}
++
++	/*
++	 * INTF can already be idle while an old CTL still owns fetch pipes.
++	 * Retire every inherited data path before installing an empty IOMMU
++	 * domain, using the same low-level operations as encoder teardown.
++	 */
++	for (i = 0; i < ARRAY_SIZE(dpu_kms->rm.ctl_blks); i++) {
++		struct dpu_hw_blk *blk = dpu_kms->rm.ctl_blks[i];
++		struct dpu_hw_ctl *ctl;
++
++		if (!blk)
++			continue;
++		ctl = to_dpu_hw_ctl(blk);
++		if (ctl->ops.clear_all_blendstages)
++			ctl->ops.clear_all_blendstages(ctl);
++		if (ctl->ops.set_active_fetch_pipes)
++			ctl->ops.set_active_fetch_pipes(ctl, NULL);
++		if (ctl->ops.set_active_pipes)
++			ctl->ops.set_active_pipes(ctl, NULL);
++		if (ctl->ops.set_active_lms)
++			ctl->ops.set_active_lms(ctl, NULL);
++		ret = ctl->ops.reset(ctl);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
+ static int _dpu_kms_mmu_init(struct dpu_kms *dpu_kms)
+ {
+ 	struct drm_gpuvm *vm;
+@@ -1329,10 +1406,12 @@
+ 	 * Now we need to read the HW catalog and initialize resources such as
+ 	 * clocks, regulators, GDSC/MMAGIC, ioremap the register ranges etc
+ 	 */
+-	rc = _dpu_kms_mmu_init(dpu_kms);
+-	if (rc) {
+-		DPU_ERROR("dpu_kms_mmu_init failed: %d\n", rc);
+-		goto err_pm_put;
++	if (!dpu_kms_needs_firmware_teardown(dpu_kms)) {
++		rc = _dpu_kms_mmu_init(dpu_kms);
++		if (rc) {
++			DPU_ERROR("dpu_kms_mmu_init failed: %d\n", rc);
++			goto err_pm_put;
++		}
+ 	}
+ 
+ 	dpu_kms->mdss = qcom_ubwc_config_get_data();
+@@ -1352,6 +1431,15 @@
+ 	if (rc) {
+ 		DPU_ERROR("rm init failed: %d\n", rc);
+ 		goto err_pm_put;
++	}
++
++	if (dpu_kms_needs_firmware_teardown(dpu_kms)) {
++		rc = dpu_kms_stop_firmware_scanout(dpu_kms);
++		if (rc)
++			goto err_pm_put;
++		rc = _dpu_kms_mmu_init(dpu_kms);
++		if (rc)
++			goto err_pm_put;
+ 	}
+ 
+ 	dpu_kms->hw_mdp = dpu_hw_mdptop_init(dev,

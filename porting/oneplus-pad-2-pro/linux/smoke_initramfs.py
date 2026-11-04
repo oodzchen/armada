@@ -202,7 +202,7 @@ display_probe() {
 	{
 		echo "uptime=$(cut -d' ' -f1 /proc/uptime)"
 		grep dsi_isr /proc/interrupts | tr -s ' '
-		echo "panel_on=$(dmesg | grep -c 'panel on (attempt')"
+		echo "panel_on=$(dmesg | grep -c 'panel prepared')"
 		echo "panel_attempt_failed=$(dmesg | grep -c 'panel on attempt .* failed')"
 		echo "dcs_failed=$(dmesg | grep -c 'sending dcs data')"
 		echo "pll_lock_failed=$(dmesg | grep -c 'DSI PLL(0) lock failed')"

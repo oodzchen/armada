@@ -1242,10 +1242,6 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: https://github.com/yzddmr6/linux-sm8750-erhai/blob/70b572544d504735e2924f6c3f5fe3bd726ef275/arch/arm64/boot/dts/qcom/sm8750-erhai.dts
   upstream: unknown
   notes: Board description vendored verbatim under the Armada DTB name. Device nodes alone do not imply that all peripherals have ported drivers or hardware validation.
-- `patches/1403-opd2413-nt36536-panel-prepare-retry.patch`
-  source: armada
-  upstream: local
-  notes: Power-cycle and retry the panel on-sequence up to three times. On OPD2413 roughly one boot in three stalls the first bonded DSI command; the retry recovers a panel that missed the sequence and reports a host-side stall, which currently persists across retries (see porting/oneplus-pad-2-pro plan §19.13).
 - `patches/1404-drm-msm-dsi-phy-7nm-undo-failed-pll-start.patch`
   source: armada
   upstream: not yet submitted
@@ -1254,3 +1250,12 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: armada
   upstream: local
   notes: On a command DMA timeout, log the control, status, FIFO, error and clock status registers of the stalled link and of its bonded partner, and report link clocks that fail to enable for a transfer. Only error paths print.
+
+- `patches/1406-drm-msm-retire-opd2413-firmware-fetch-before-iommu.patch`
+  source: armada; boot-data-path teardown discussion at https://lists.openwall.net/linux-kernel/2021/05/12/3502 and https://lists.openwall.net/linux-kernel/2022/02/17/30
+  upstream: not yet submitted
+  notes: Keep SM8750 MDSS in the default identity domain until DRM takes ownership. On OPD2413, create the resource objects, stop both inherited DSI timing engines, clear CTL layer/fetch ownership and complete CTL resets before attaching the KMS paging domain. Timeout errors stop the handoff. Other boards retain their KMS initialization order; normal DRM rendering still uses translated mappings. Removes the ineffective 1403 panel retry from the series. Regression model: `python3 porting/oneplus-pad-2-pro/linux/test_kms_handoff.py --kernel-source <patched-kernel-tree>`. The identity-domain entry is needed: without it, the bootloader scanout faults as soon as the SMMU attaches the default DMA domain. The scanout stop and CTL teardown in dpu_kms_hw_init() run after the msm_mdss core reset, which has already stopped the timing engines (active mask 0 on every boot), so on their own they did not fix the black screen (failed boot 8 of 8). 1407 now retires the scanout before that reset. The 1406 teardown is kept as tested until a regression run without it is done.
+- `patches/1407-drm-msm-mdss-retire-opd2413-boot-scanout-before-reset.patch`
+  source: armada; display disable order from dpu_encoder_helper_phys_cleanup() and the VBIF AXI halt of dpu_vbif_axi_halt_request()
+  upstream: not yet submitted
+  notes: The OPD2413 bootloader scans out through CTL_0/VIG0-3 with programmable fetch enabled, and msm_mdss_init() resets the MDSS in the middle of that. A pending read of the old splash buffer survives the reset; the first DSI command DMA after the KMS IOMMU attach releases it, and it faults and stalls the MDSS read path (about one boot in four stayed dark). Before the core reset, this patch turns programmable fetch off through the owning CTL's INTF flush, lets a frame start with it off, stops the DSI timing engines, resets the owning CTL, and requests the VBIF AXI halt with an acknowledgment. The halt is released after the reset, touching only the VBIF, because MDP blocks abort reads right after the reset. Limited to oneplus,erhai + qcom,sm8750-mdss. One line per boot reports what was found ("bootloader scanout: ..."). Regression model: `python3 porting/oneplus-pad-2-pro/linux/test_mdss_boot_handoff.py --kernel-source <patched-kernel-tree>`. Hardware result: 16 of 16 unattended temporary boots showed a picture with the AXI halt acknowledged. Without the programmable-fetch step, a CTL reset was acknowledged only some of the time, and every boot without the acknowledgment stayed dark (plan §19.24–19.26).

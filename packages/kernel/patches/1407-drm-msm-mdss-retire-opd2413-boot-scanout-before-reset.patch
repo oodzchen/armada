@@ -1,0 +1,510 @@
+From: Armada contributors
+Subject: [PATCH] drm/msm/mdss: retire the OPD2413 boot scanout before the MDSS reset
+
+The OPD2413 bootloader hands over with the bonded DSI pipeline still
+scanning out of its splash buffer through CTL_0 and VIG0-3, with
+programmable fetch starting 25 lines before the end of each frame.
+msm_mdss_init() asserts the MDSS core BCR in the middle of that. A read of
+the old splash buffer that the pipes have pending survives the reset. In
+about one boot in four, the first DSI command DMA after the KMS IOMMU
+attach releases it: it faults (always at the line 46/47 boundary of the
+bootloader's four rects), the shared read path stops, both DSI links keep
+CMD_MODE_DMA_BUSY, every command times out and the panel stays dark until
+the next reboot.
+
+Before the reset, retire the inherited pipeline the way a display disable
+does before a power collapse:
+
+ - turn programmable fetch off through the owning CTL's INTF flush, as an
+   encoder enable programs it, and wait until a frame has started with it
+   off. Otherwise the pipes are already fetching the next frame when the
+   timing engine stops, and a CTL reset retires that fetch only some of
+   the time;
+ - stop the DSI timing engines at the end of that frame;
+ - reset the CTLs while they still own the pipes (the order of
+   dpu_encoder_helper_phys_cleanup());
+ - halt the VBIF AXI ports as dpu_vbif_axi_halt_request() does, and
+   require the acknowledgment. On this board, whether that halt is
+   acknowledged decided every boot tested: a boot with the acknowledgment
+   showed a picture, and a boot without it stayed dark.
+
+Release the halt once the reset is over. Only the VBIF is touched then,
+because an MDP block read right after the reset is answered with an
+external abort.
+
+Nothing is written when no inherited timing engine runs. A wait that runs
+out is reported, and the reset goes ahead as before. The change is limited
+to the tested board, and one line per boot reports what was found.
+---
+diff --git a/drivers/gpu/drm/msm/msm_mdss.c b/drivers/gpu/drm/msm/msm_mdss.c
+--- a/drivers/gpu/drm/msm/msm_mdss.c
++++ b/drivers/gpu/drm/msm/msm_mdss.c
+@@ -7,10 +7,14 @@
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+ #include <linux/interconnect.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
+ #include <linux/irq.h>
+ #include <linux/irqchip.h>
+ #include <linux/irqdesc.h>
+ #include <linux/irqchip/chained_irq.h>
++#include <linux/ktime.h>
++#include <linux/of_address.h>
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+@@ -306,8 +310,437 @@
+ 	irq_set_chained_handler_and_data(irq, NULL, NULL);
+ }
+ 
++/*
++ * OPD2413 boot handoff.  The bootloader leaves the bonded DSI pipeline
++ * scanning out of its splash buffer, with programmable fetch enabled, when
++ * Linux starts.  On this board a read of the old splash buffer that the
++ * pipes already have pending survives the core BCR reset below; the first
++ * DSI command DMA after the KMS IOMMU attach releases it, it faults, and the
++ * MDSS read path stops.  Retire the inherited pipeline the way a display
++ * disable does before a power collapse: stop the timing engines at a frame
++ * boundary, reset the CTLs while they still own the pipes (the order of
++ * dpu_encoder_helper_phys_cleanup()), then halt the VBIF AXI ports as
++ * dpu_vbif_axi_halt_request() does.  Release the halt after the reset.
++ *
++ * With programmable fetch the pipes start fetching the next frame before the
++ * timing engine stops, and a CTL reset does not always retire that fetch
++ * once it is waiting for buffer space: the AXI halt is then never
++ * acknowledged.  So turn programmable fetch off first and let a frame start
++ * with it off before the stop is requested.
++ */
++#define MDSS_BOOT_INTF_TIMING_ENGINE_EN	0x000
++#define MDSS_BOOT_INTF_CONFIG		0x004
++#define MDSS_BOOT_INTF_FRAME_COUNT	0x0ac
++#define MDSS_BOOT_INTF_LINE_COUNT	0x0b0
++#define MDSS_BOOT_INTF_PROG_FETCH_START	0x170
++#define MDSS_BOOT_INTF_STATUS		0x26c
++#define MDSS_BOOT_INTF_PROG_FETCH_EN	BIT(31)
++#define MDSS_BOOT_CTL_FLUSH		0x018
++#define MDSS_BOOT_CTL_FLUSH_INTF	BIT(31)
++#define MDSS_BOOT_CTL_SW_RESET		0x030
++#define MDSS_BOOT_CTL_SW_RESET_OVERRIDE	0x060
++#define MDSS_BOOT_CTL_INTF_ACTIVE	0x0f4
++#define MDSS_BOOT_CTL_FETCH_PIPE_ACTIVE	0x0fc
++#define MDSS_BOOT_CTL_INTF_FLUSH	0x110
++#define MDSS_BOOT_CTL_PIPE_ACTIVE	0x12c
++#define MDSS_BOOT_SSPP_SRC_SIZE		0x000
++#define MDSS_BOOT_SSPP_SRC0_ADDR	0x014
++#define MDSS_BOOT_VBIF_CLKON		0x004
++#define MDSS_BOOT_VBIF_AXI_HALT_CTRL0	0x208
++#define MDSS_BOOT_VBIF_AXI_HALT_CTRL1	0x20c
++#define MDSS_BOOT_VBIF_CLKON_FORCE_ON	BIT(0)
++#define MDSS_BOOT_VBIF_AXI_HALT_REQ	BIT(0)
++#define MDSS_BOOT_VBIF_AXI_HALT_ACK	BIT(0)
++#define MDSS_BOOT_INTF_STOP_TIMEOUT_US	100000
++#define MDSS_BOOT_CTL_FLUSH_TIMEOUT_US	100000
++#define MDSS_BOOT_CTL_RESET_TIMEOUT_US	2000
++#define MDSS_BOOT_AXI_HALT_TIMEOUT_US	4000
++
++/* SM8750 blocks, relative to the DPU "mdp" region */
++static const u32 mdss_boot_dsi_intf[] = { 0x35000, 0x36000 };	/* INTF_1/2 */
++/* their bits in CTL_INTF_FLUSH (BIT(intf - INTF_0)) */
++static const u32 mdss_boot_dsi_intf_flush[] = { BIT(1), BIT(2) };
++
++static const u32 mdss_boot_ctl[] = {
++	0x15000, 0x16000, 0x17000, 0x18000, 0x19000, 0x1a000,
++};
++
++static const u32 mdss_boot_sspp[] = {	/* VIG0-3, DMA0-5 */
++	0x4000, 0x6000, 0x8000, 0xa000,
++	0x24000, 0x26000, 0x28000, 0x2a000, 0x2c000, 0x2e000,
++};
++
++enum mdss_boot_ctl_result { CTL_RESET_NONE, CTL_RESET_SOFT, CTL_RESET_FORCED,
++			    CTL_RESET_FAILED };
++
++struct mdss_boot_quiesce {
++	void __iomem *mdp;
++	void __iomem *vbif;
++	/* inherited timing engines, BIT(i) for mdss_boot_dsi_intf[i] */
++	u32 active;
++	u32 stopped;
++	u32 config[ARRAY_SIZE(mdss_boot_dsi_intf)];
++	u32 line[ARRAY_SIZE(mdss_boot_dsi_intf)];
++	u32 frame[ARRAY_SIZE(mdss_boot_dsi_intf)];
++	u32 prog_fetch_start;
++	s64 stop_us;
++	/* CTLs that owned the scanout (all of them if none says so) */
++	u32 ctls;
++	bool ctls_claimed;
++	/*
++	 * programmable fetch turned off on these INTFs, -ETIMEDOUT if the
++	 * flush that carries it was not consumed
++	 */
++	u32 prog_fetch_off;
++	int prog_fetch_ret;
++	s64 prog_fetch_us;
++	enum mdss_boot_ctl_result ctl_result;
++	s64 ctl_us;
++	/* SSPPs with a source size or address, and one of their addresses */
++	u32 sspp_live;
++	u32 sspp_addr;
++	/* VBIF_AXI_HALT_CTRL1 when the wait ended, CTRL0/1 after the reset */
++	u32 halt_status;
++	s64 halt_us;
++	bool halted;
++	bool halt_acked;
++	u32 reset_ctrl0;
++	u32 reset_ctrl1;
++};
++
++static u32 mdss_boot_scan_sspp(void __iomem *mdp, u32 *addr)
++{
++	u32 live = 0;
++	int i;
++
++	*addr = 0;
++	for (i = 0; i < ARRAY_SIZE(mdss_boot_sspp); i++) {
++		void __iomem *sspp = mdp + mdss_boot_sspp[i];
++		u32 src = readl(sspp + MDSS_BOOT_SSPP_SRC0_ADDR);
++
++		if (!readl(sspp + MDSS_BOOT_SSPP_SRC_SIZE) && !src)
++			continue;
++		live |= BIT(i);
++		if (!*addr)
++			*addr = src;
++	}
++
++	return live;
++}
++
++/* Soft reset first; force it through the override if it stays pending. */
++static enum mdss_boot_ctl_result mdss_boot_reset_ctl(void __iomem *ctl)
++{
++	u32 status;
++
++	writel(1, ctl + MDSS_BOOT_CTL_SW_RESET);
++	if (!readl_poll_timeout(ctl + MDSS_BOOT_CTL_SW_RESET, status,
++				!(status & BIT(0)), 20,
++				MDSS_BOOT_CTL_RESET_TIMEOUT_US))
++		return CTL_RESET_SOFT;
++
++	/* a back-to-back assert and release is ignored: hold it briefly */
++	writel(1, ctl + MDSS_BOOT_CTL_SW_RESET_OVERRIDE);
++	usleep_range(100, 200);
++	writel(0, ctl + MDSS_BOOT_CTL_SW_RESET_OVERRIDE);
++	if (!readl_poll_timeout(ctl + MDSS_BOOT_CTL_SW_RESET, status,
++				!(status & BIT(0)), 20,
++				MDSS_BOOT_CTL_RESET_TIMEOUT_US))
++		return CTL_RESET_FORCED;
++
++	return CTL_RESET_FAILED;
++}
++
++/*
++ * Returns 0 when no inherited scanout is running or once it is retired and
++ * the AXI ports acknowledged the halt, or -ETIMEDOUT if a wait ran out.  The
++ * later steps run even then: whatever did drain is better than nothing.
++ */
++static int mdss_boot_quiesce_hw(struct mdss_boot_quiesce *q)
++{
++	ktime_t start;
++	u32 status;
++	int i, ret = 0;
++
++	for (i = 0; i < ARRAY_SIZE(mdss_boot_dsi_intf); i++) {
++		void __iomem *intf = q->mdp + mdss_boot_dsi_intf[i];
++
++		if (!(readl(intf + MDSS_BOOT_INTF_STATUS) & BIT(0)))
++			continue;
++		q->active |= BIT(i);
++		q->config[i] = readl(intf + MDSS_BOOT_INTF_CONFIG);
++		q->line[i] = readl(intf + MDSS_BOOT_INTF_LINE_COUNT);
++		q->frame[i] = readl(intf + MDSS_BOOT_INTF_FRAME_COUNT);
++	}
++	if (!q->active)
++		return 0;
++
++	q->prog_fetch_start = readl(q->mdp + mdss_boot_dsi_intf[0] +
++				    MDSS_BOOT_INTF_PROG_FETCH_START);
++	for (i = 0; i < ARRAY_SIZE(mdss_boot_ctl); i++) {
++		void __iomem *ctl = q->mdp + mdss_boot_ctl[i];
++
++		if (readl(ctl + MDSS_BOOT_CTL_INTF_ACTIVE) ||
++		    readl(ctl + MDSS_BOOT_CTL_FETCH_PIPE_ACTIVE) ||
++		    readl(ctl + MDSS_BOOT_CTL_PIPE_ACTIVE))
++			q->ctls |= BIT(i);
++	}
++	q->ctls_claimed = q->ctls;
++	if (!q->ctls)
++		q->ctls = GENMASK(ARRAY_SIZE(mdss_boot_ctl) - 1, 0);
++	q->sspp_live = mdss_boot_scan_sspp(q->mdp, &q->sspp_addr);
++
++	/*
++	 * Turn programmable fetch off through the CTLs that drive the INTFs,
++	 * as an encoder enable programs it, and wait until a frame has
++	 * started with it off.  Without a CTL claiming the scanout there is
++	 * nothing safe to flush through; the stop then goes ahead as is.
++	 */
++	if (q->ctls_claimed) {
++		u32 flush = 0;
++
++		for (i = 0; i < ARRAY_SIZE(mdss_boot_dsi_intf); i++) {
++			void __iomem *intf = q->mdp + mdss_boot_dsi_intf[i];
++
++			if (!(q->active & BIT(i)) ||
++			    !(q->config[i] & MDSS_BOOT_INTF_PROG_FETCH_EN))
++				continue;
++			writel(q->config[i] & ~MDSS_BOOT_INTF_PROG_FETCH_EN,
++			       intf + MDSS_BOOT_INTF_CONFIG);
++			q->prog_fetch_off |= BIT(i);
++			flush |= mdss_boot_dsi_intf_flush[i];
++		}
++		if (flush) {
++			start = ktime_get();
++			for (i = 0; i < ARRAY_SIZE(mdss_boot_ctl); i++) {
++				void __iomem *ctl = q->mdp + mdss_boot_ctl[i];
++
++				if (!(q->ctls & BIT(i)))
++					continue;
++				writel(flush, ctl + MDSS_BOOT_CTL_INTF_FLUSH);
++				writel(MDSS_BOOT_CTL_FLUSH_INTF,
++				       ctl + MDSS_BOOT_CTL_FLUSH);
++			}
++			for (i = 0; i < ARRAY_SIZE(mdss_boot_ctl); i++) {
++				void __iomem *ctl = q->mdp + mdss_boot_ctl[i];
++
++				if (!(q->ctls & BIT(i)))
++					continue;
++				/* consumed when the next frame starts */
++				if (readl_poll_timeout(ctl + MDSS_BOOT_CTL_FLUSH,
++						       status, !status, 100,
++						       MDSS_BOOT_CTL_FLUSH_TIMEOUT_US))
++					q->prog_fetch_ret = -ETIMEDOUT;
++			}
++			q->prog_fetch_us = ktime_us_delta(ktime_get(), start);
++			if (q->prog_fetch_ret)
++				ret = q->prog_fetch_ret;
++		}
++	}
++
++	/*
++	 * The bonded interfaces run from one timing source: request both
++	 * stops before waiting on either.  The enable is double buffered and
++	 * takes effect at the end of the frame being scanned out.
++	 */
++	start = ktime_get();
++	for (i = 0; i < ARRAY_SIZE(mdss_boot_dsi_intf); i++)
++		if (q->active & BIT(i))
++			writel(0, q->mdp + mdss_boot_dsi_intf[i] +
++				  MDSS_BOOT_INTF_TIMING_ENGINE_EN);
++
++	for (i = 0; i < ARRAY_SIZE(mdss_boot_dsi_intf); i++) {
++		void __iomem *intf = q->mdp + mdss_boot_dsi_intf[i];
++
++		if (!(q->active & BIT(i)))
++			continue;
++		if (readl_poll_timeout(intf + MDSS_BOOT_INTF_STATUS, status,
++				       !(status & BIT(0)), 100,
++				       MDSS_BOOT_INTF_STOP_TIMEOUT_US))
++			ret = -ETIMEDOUT;
++		else
++			q->stopped |= BIT(i);
++	}
++	q->stop_us = ktime_us_delta(ktime_get(), start);
++
++	/*
++	 * With programmable fetch the pipes already fetch the next frame when
++	 * the timing engine stops.  Reset the CTLs while they still own them;
++	 * this is what retires that fetch, not the core reset.
++	 */
++	start = ktime_get();
++	for (i = 0; i < ARRAY_SIZE(mdss_boot_ctl); i++) {
++		enum mdss_boot_ctl_result r;
++
++		if (!(q->ctls & BIT(i)))
++			continue;
++		r = mdss_boot_reset_ctl(q->mdp + mdss_boot_ctl[i]);
++		if (r > q->ctl_result)
++			q->ctl_result = r;
++	}
++	q->ctl_us = ktime_us_delta(ktime_get(), start);
++	if (q->ctl_result == CTL_RESET_FAILED)
++		ret = -ETIMEDOUT;
++
++	/* The VBIF clock has to run while the halt is requested. */
++	writel(readl(q->vbif + MDSS_BOOT_VBIF_CLKON) |
++	       MDSS_BOOT_VBIF_CLKON_FORCE_ON, q->vbif + MDSS_BOOT_VBIF_CLKON);
++	writel(MDSS_BOOT_VBIF_AXI_HALT_REQ,
++	       q->vbif + MDSS_BOOT_VBIF_AXI_HALT_CTRL0);
++	q->halted = true;
++	/* the request has to reach the VBIF before it is polled for */
++	wmb();
++
++	/* Idle port bits alone are not enough: require the acknowledgment. */
++	start = ktime_get();
++	if (readl_poll_timeout(q->vbif + MDSS_BOOT_VBIF_AXI_HALT_CTRL1, status,
++			       status & MDSS_BOOT_VBIF_AXI_HALT_ACK, 10,
++			       MDSS_BOOT_AXI_HALT_TIMEOUT_US))
++		ret = -ETIMEDOUT;
++	else
++		q->halt_acked = true;
++	q->halt_us = ktime_us_delta(ktime_get(), start);
++	q->halt_status = status;
++
++	return ret;
++}
++
++/*
++ * After the reset: record what it left and release the halt.  Only the VBIF
++ * may be touched here: an MDP block read right after the reset is answered
++ * with an external abort.
++ */
++static void mdss_boot_release_hw(struct mdss_boot_quiesce *q)
++{
++	u32 clkon;
++
++	if (!q->halted)
++		return;
++
++	q->reset_ctrl0 = readl(q->vbif + MDSS_BOOT_VBIF_AXI_HALT_CTRL0);
++	q->reset_ctrl1 = readl(q->vbif + MDSS_BOOT_VBIF_AXI_HALT_CTRL1);
++	writel(0, q->vbif + MDSS_BOOT_VBIF_AXI_HALT_CTRL0);
++	clkon = readl(q->vbif + MDSS_BOOT_VBIF_CLKON);
++	writel(clkon & ~MDSS_BOOT_VBIF_CLKON_FORCE_ON,
++	       q->vbif + MDSS_BOOT_VBIF_CLKON);
++	/* The DPU may only start programming the VBIF after this. */
++	wmb();
++}
++
++static void __iomem *mdss_boot_map(struct device_node *np, const char *name)
++{
++	struct resource res;
++	int idx = of_property_match_string(np, "reg-names", name);
++
++	if (idx < 0 || of_address_to_resource(np, idx, &res))
++		return NULL;
++
++	return ioremap(res.start, resource_size(&res));
++}
++
++struct mdss_boot_handoff {
++	struct mdss_boot_quiesce q;
++	struct clk_bulk_data *clocks;
++	int num_clocks;
++	int ret;
++};
++
++static void mdss_boot_handoff_put(struct mdss_boot_handoff *h)
++{
++	if (h->clocks) {
++		clk_bulk_disable_unprepare(h->num_clocks, h->clocks);
++		clk_bulk_put_all(h->num_clocks, h->clocks);
++		h->clocks = NULL;
++	}
++	if (h->q.mdp)
++		iounmap(h->q.mdp);
++	if (h->q.vbif)
++		iounmap(h->q.vbif);
++	h->q.mdp = NULL;
++	h->q.vbif = NULL;
++}
++
++/* Only called right before the reset is asserted. */
++static void mdss_boot_handoff_begin(struct device *dev,
++				    struct mdss_boot_handoff *h)
++{
++	struct device_node *np;
++	int ret;
++
++	if (!of_device_is_compatible(dev->of_node, "qcom,sm8750-mdss") ||
++	    !of_machine_is_compatible("oneplus,erhai"))
++		return;
++
++	np = of_get_compatible_child(dev->of_node, "qcom,sm8750-dpu");
++	if (!np)
++		return;
++	h->q.mdp = mdss_boot_map(np, "mdp");
++	h->q.vbif = mdss_boot_map(np, "vbif");
++	of_node_put(np);
++	if (!h->q.mdp || !h->q.vbif)
++		goto fail;
++
++	/* The DPU registers are only reachable with the MDSS clocks on. */
++	ret = clk_bulk_get_all(dev, &h->clocks);
++	if (ret <= 0) {
++		h->clocks = NULL;
++		goto fail;
++	}
++	h->num_clocks = ret;
++	ret = clk_bulk_prepare_enable(h->num_clocks, h->clocks);
++	if (ret) {
++		clk_bulk_put_all(h->num_clocks, h->clocks);
++		h->clocks = NULL;
++		goto fail;
++	}
++
++	h->ret = mdss_boot_quiesce_hw(&h->q);
++	return;
++
++fail:
++	dev_warn(dev, "bootloader scanout not quiesced: resources unavailable\n");
++	mdss_boot_handoff_put(h);
++}
++
++static const char * const mdss_boot_ctl_result_name[] = {
++	"none", "soft", "forced", "failed",
++};
++
++#define MDSS_BOOT_REPORT_FMT \
++	"bootloader scanout: intf %#x (cfg %08x/%08x pf %08x line %u/%u frame %u/%u) prog fetch off %#x in %lld us%s, stopped %#x in %lld us, ctl %#x reset %s in %lld us, axi halt %s %08x in %lld us, sspp %#x %08x, after reset %08x/%08x\n"
++#define MDSS_BOOT_REPORT_ARGS(q) \
++	(q)->active, \
++	(q)->config[0], (q)->config[1], (q)->prog_fetch_start, \
++	(q)->line[0], (q)->line[1], (q)->frame[0], (q)->frame[1], \
++	(q)->prog_fetch_off, (q)->prog_fetch_us, \
++	(q)->prog_fetch_ret ? " (flush timed out)" : "", \
++	(q)->stopped, (q)->stop_us, \
++	(q)->ctls, mdss_boot_ctl_result_name[(q)->ctl_result], (q)->ctl_us, \
++	(q)->halt_acked ? "ack" : "no-ack", (q)->halt_status, (q)->halt_us, \
++	(q)->sspp_live, (q)->sspp_addr, \
++	(q)->reset_ctrl0, (q)->reset_ctrl1
++
++static void mdss_boot_handoff_end(struct device *dev,
++				  struct mdss_boot_handoff *h)
++{
++	struct mdss_boot_quiesce *q = &h->q;
++
++	if (!h->clocks)
++		return;
++
++	mdss_boot_release_hw(q);
++	if (!q->active)
++		dev_info(dev, "bootloader scanout: none running\n");
++	else if (h->ret)
++		dev_warn(dev, MDSS_BOOT_REPORT_FMT, MDSS_BOOT_REPORT_ARGS(q));
++	else
++		dev_info(dev, MDSS_BOOT_REPORT_FMT, MDSS_BOOT_REPORT_ARGS(q));
++	mdss_boot_handoff_put(h);
++}
++
+ static int msm_mdss_reset(struct device *dev)
+ {
++	struct mdss_boot_handoff handoff = {};
+ 	struct reset_control *reset;
+ 
+ 	reset = reset_control_get_optional_exclusive(dev, NULL);
+@@ -319,6 +752,7 @@
+ 				     "failed to acquire mdss reset\n");
+ 	}
+ 
++	mdss_boot_handoff_begin(dev, &handoff);
+ 	reset_control_assert(reset);
+ 	/*
+ 	 * Tests indicate that reset has to be held for some period of time,
+@@ -326,6 +760,7 @@
+ 	 */
+ 	msleep(20);
+ 	reset_control_deassert(reset);
++	mdss_boot_handoff_end(dev, &handoff);
+ 
+ 	reset_control_put(reset);
+ 
