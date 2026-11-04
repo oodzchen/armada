@@ -14,7 +14,7 @@
 | 四：Armada 设备移植与 USB 试启动 | 完整系统已进入桌面/游戏模式；显示、触控、磁吸键盘、触控板、Wi-Fi 和桌面音频已实测。配套内核/1594 模块及 USB 持久层工作；1408 音频源码、拓扑和 UCM 已纳入构建，服务失败项已清零 | 完整新镜像/全新可写层冷启动；逐颗扬声器、麦克风增益和开机 APM 超时；挂起恢复与长期稳定性 |
 | 五：安装与固化双启动 | 部分：kShimC 菜单已固化到 `boot_b`，但 Linux 启动文件仍内嵌在 boot、根文件系统仍在 U 盘 | 内部 ESP/根/数据布局、最终 boot（不再内嵌 ESP）、升级/恢复方案及多轮双系统启动回归 |
 
-**下一项工作**：确定机内空间方案（§21.2 第 3 项；Linux UFS 只读探测已通过，§19.40）。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
+**下一项工作**：Armada 已从内部 UFS 启动（§19.41）；Android 需在 recovery 清除数据并恢复备份，随后做两系统冷启动、更新/回滚与外设回归。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
 
 **剩余工作量**主要在：从源码完整重建新镜像并完成全新可写层/冷启动回归、其余外设和休眠稳定性、内部存储与 ESP 布局、双启动固化及升级/恢复方案。桌面/游戏模式、USB 根文件系统和 Wi-Fi 已有实测记录，不再列为尚未启动。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
 
@@ -1307,6 +1307,17 @@ CRC verified; 0 bytes recovered relative to first replica
 - **结果（`ufs1/ufs-1.txt`）**：三星 KLUFG4NHHB（UFS 4.0，rev 1200），6 个 LUN 5 s 内出现，MCQ 9 队列，ICE v4.0.3；6 盘、129 个分区全部 `ro=1`，**写入次数/扇区/flush 全为 0**；6 个 LUN 容量、4 KiB 逻辑扇区与备份一致，**12 份 GPT 主/备份表与 11-02 备份逐字节一致**；119 个分区哈希中两个槽位的 boot/init_boot/vendor_boot/dtbo/recovery/vbmeta 全部一致（boot_b 为新写入值）；仅 persist、oplusreserve1/3/5、spunvm 不同，回到 Android 再读时 persist/oplusreserve1/5/spunvm 又变化，确认为 Android 运行时写入。无 UFS 错误、无 SMMU fault；寿命估计 0x01。链路当前为 HS-G2（UFS 4.0 应可到 G5，性能问题以后看）。删除设备后 UFS 主机 runtime suspend，系统 running、失败单元 0。重启回 Android 正常，Android 内核日志无 ufshcd 错误（`android-after-probe.txt`）。
 - **存储布局事实（只读）**：6 个 LUN 均无未分配空间；userdata 在 LUN0 末尾（460 GB，已用 153 GB），f2fs + FBE + 元数据加密（密钥在 TEE），Linux 无法读取、f2fs 不能在线缩小；Virtual A/B（压缩）。机内安装 Armada 必须从 userdata 取得空间，见 §21.2 第 3 项。
 
+### 19.41 机内安装：LUN0 重新分区与 Armada 首次从 UFS 启动（2026-11-04）
+
+- **备份**（`~/oneplus-pad2pro-backup/userdata-20261104/`，700 权限，总清单 263 项）：内部存储、`/data/adb`、58 个第三方应用（APK+CE+DE，带 SELinux 标签/uid；微信与 oshin 以 `pm disable-user` 冻结后重做）、DroidDeck 42 GB、Droidspaces 容器 87 GB（停止容器后稀疏打包）、系统目录、382 个系统应用数据、settings/dumpsys/Wi-Fi 导出；逐文件哈希与设备端清单比对。用户未做 ColorOS「备份与恢复」。无线 adb exec-out 约 41 MiB/s，改为设备端暂存 + `adb pull`（USB 3）约 117 MB/s。
+- **工具（已提交）**：`opd_gpt.py` 按字节修改 GPT（只改 userdata 结束 LBA、新增 16–18、重算 CRC，逐字节核对改动范围），LUN0 条目数组为 32×128 字节（1 个扇区）；`opd_install.py check/gpt/deploy`：写前必须是备份时的原表，先写备份表再写主表并回读，`deploy` 按 armada-installer 布局（FAT16 4K 扇区/16K 簇、ext4 /boot、btrfs root/var/home）用 `ostree container image deploy` 从 OCI 包部署，来源指向 `/var/lib/armada/opd2413/armada.ociarchive`，内核参数 = 镜像 kargs.d + `clk/pd/regulator_ignore_unused selinux=0`，再运行 `armada-efi-update`。测试 `tests/opd-install-test.py`（合成 4K GPT，sfdisk 交叉校验）。首次 deploy 因 `<commit>.0.origin` 与部署目录同被 glob 匹配而停止，修正后重跑成功。
+- **保护（已提交，实机生效）**：`90-armada-ufs-guard.rules` + `ufs-guard`（仅型号为 OnePlus Pad 2 Pro 时生效）：LUN1–5 整盘只读，LUN0 除 `ARMADA*` 外逐分区只读（整盘只读会连带全部分区）；initramfs `opd.ufsguard` 在 switch_root 前先按同规则加锁。`armada-installer` 与 `installer-visibility` 在 `ARMADA_ABL_MANAGED=0` 设备上拒绝/隐藏；`armada-update` 在这类设备上拒绝切换到官方仓库（官方镜像无 OPD2413 内核补丁；device-env 不可用时默认拒绝）。
+- **U-Boot `--esp-ufs ARMADA`（已提交）**：按 PARTLABEL 在 LUN0 找 ESP，加载 `/dtbs/qcom/sm8750-oneplus-pad2pro.dtb`（Armada 内核包 DTB，UFS 启用、ramoops 正式地址）与 systemd-boot，`bootefi` 时传入该 DTB（dtbloader 不认识本机，保留之）；无块/按键测试，按键直接作为菜单输入；找不到分区时回 Android。QEMU（合成 LUN0+FAT16 ESP）EL1/EL2 正反向通过；实机在旧表上回 Android 通过。armada-efi-update 的 `timeout 3` 使 kShimC 选 Armada 后无需二次选择，3 秒内可选 `(Rollback)`。
+- **boot_b `ins1`**（`4e307868…`，经无线 adb 在 Android 中写入并整分区回读）：kShimC 为 ColorOS（默认）/ Armada（内部）/ Armada USB disk；内嵌 ESP 缩到内容大小，boot 90.3 MiB、余 5.9 MB。USB 根换为 armada20（`d54a4bb5…`，armada19 硬链接保留于 U 盘 backups）。Armada 正式 kargs（含 `fw_devlink.strict=1`）在 USB 上先验证：延迟探测项与以往相同，音频/显示/触控/Wi-Fi 正常。
+- **写入**（用户逐项批准）：安装会话中 LUN0 15 个分区只读、LUN1–5 整盘只读；GPT 写入回读一致（`new`），userdata 204 GiB，ARMADA/ARMADA_BOOT/ARMADA_ROOT 512 MiB/1 GiB/254.5 GiB；部署提交 `b0402782…`，ESP 同步 65 文件；内部系统补入禁止挂起、sshd（仅密钥）与 Wi-Fi 配置。
+- **首次内部启动**（拔 U 盘，kShimC 选 Armada）：U-Boot→systemd-boot（3 秒）→内核→dracut→ostree composefs 根，`running`、失败单元 0；root=UUID `ARMADA_ROOT`，/var、/var/home 为 btrfs 子卷（/var/home 余 232 GB），/boot ext4、/boot/efi ESP；DT 为内核包 DTB（UFS okay、ramoops 0xbfff00000）；ufs-guard 执行 153 次，userdata/super 只读；声卡、DSI、ADSP/CDSP 正常；Steam 首次更新中。rpm-ostree 来源为本地 OCI 包。
+- **未完成**：Android 需在 recovery 中清除数据后重新设置并恢复备份；Armada 内部系统的音频/触控/休眠等完整回归、两系统冷启动 10 轮、一次 Armada 更新与回滚；SELinux 仍为 0。
+
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 
 | 内容 | 位置 |
@@ -1422,3 +1433,37 @@ python3 porting/oneplus-pad-2-pro/linux/decode_smoke.py \
 | Android回归与维护 | 两系统多轮冷启动/切换后，复查Android解锁、指纹、Wi-Fi、充电及既有KernelSU/susfs；核对预期boot内容和非目标分区未被更改，再验证更新与恢复 |
 
 **唯一下一步**：确定机内空间方案（§21.2 第 3 项）；Linux UFS 只读探测已通过（§19.40），仍保持 USB 根不变、不写内部介质。独立镜像与全新可写层已验收、kShimC 已写入 `boot_b`（§19.39）；设备在 armada19 桌面，U 盘留在平板上，换启动文件时需按 §19.39 重写 `boot_b`。
+
+## 22. 机内安装方案（用户决定：重新分区，Armada 256 GiB，2026-11-04）
+
+### 22.1 决定与依据
+
+userdata（LUN0 末尾，460 GiB，f2fs + FBE + 元数据加密）是唯一可取空间的位置，6 个 LUN 均无未分配空间（§19.40），加密使 Linux 无法读取或缩小它。用户选择重新分区并清空 Android 用户数据，Armada 取 256 GiB。Android 系统、各槽位分区、init_boot 中的 KernelSU、WildKernel 与 kShimC 不受影响。
+
+### 22.2 LUN0 目标布局（4 KiB 扇区，按 11-02 备份 GPT 计算，执行前需用实机 GPT 复核）
+
+| # | 名称 | 起始 LBA | 结束 LBA（含） | 大小 | 说明 |
+|---|---|---|---|---|---|
+| 1–14 | ssd … super | 不变 | 不变 | — | 不改 |
+| 15 | userdata | 3617586 | 57087743 | 203.97 GiB（原 459.97） | 起点不变，缩小后由 Android 重新格式化 |
+| 16 | ARMADA | 57087744 | 57218815 | 512 MiB | ESP，FAT16，类型 C12A7328…，与 armada-installer 一致 |
+| 17 | ARMADA_BOOT | 57218816 | 57480959 | 1 GiB | ext4 `/boot` |
+| 18 | ARMADA_ROOT | 57480960 | 124196607 | 254.50 GiB | btrfs（zstd:1），ostree sysroot + 用户数据 |
+
+GPT 共 32 项、已用 15 项；磁盘 GUID、其余条目、备份 GPT 位置保持不变。只写 LUN0 的主/备份 GPT，其他 LUN 不写。
+
+### 22.3 Android 数据（2026-11-04 只读统计）
+
+内部存储文件 `/data/media/0` 1.2 GB；第三方应用 58 个（`/data/app` 13 GB，`/data/data` 49 GB）；`/data/adb` 97 MB，KernelSU 模块 droidspaces、extreme_gt、fas_rs、susfs4ksu、zygisk_lsposed、zygisksu。备份方式由用户选择（文件 adb 拉取；`/data/adb` 以 root 打包；应用及数据可用 root 备份工具或重新下载）。
+
+### 22.4 步骤（每次写入前单独确认）
+
+1. **备份**：Android 数据如上；复核六个 LUN 的 GPT 与当前 boot_b、persist 等运行时分区的新鲜备份。
+2. **离线准备**：U-Boot 从 UFS LUN0 的 `ARMADA` 分区只读加载 systemd-boot 与启动项（替代内嵌 ESP Blob）；内部启动项用启用 UFS 的 DTB 和 Armada 自身的 dracut initramfs（ostree root/boot 按 UUID）；在 USB 系统中从本地 OCI 镜像创建 ostree 部署的流程（现有 armada-installer 要求已启动的 OSTree 源，USB squashfs 不满足）；GPT 修改在 LUN0 GPT 副本（稀疏文件）上演练并比对。
+3. **写 GPT**：从 USB Armada 以专用模式仅对 LUN0 可写，写入新表并回读主/备份 GPT、确认 1–14 号条目逐字节不变。
+4. **Android 格式化 userdata**：在 recovery 中清除数据（同时清 metadata 密钥），Android 首次开机设置后恢复数据、重装 KernelSU 管理器和模块。
+5. **部署 Armada**：mkfs 三个分区，部署 ostree，`armada-efi-update` 填充 ESP。
+6. **新 boot_b**：kShimC + U-Boot（不再内嵌 ESP，约 41 MiB，迁移 vbmeta），菜单为 ColorOS（默认）/ Armada（直接启动默认部署）/ Armada 启动菜单（一次性显示 systemd-boot，含 `(Rollback)` 项）。
+7. **验收**：拔 U 盘和电脑，两系统冷启动各至少 10 轮；Armada 更新与回滚各一次；Android 解锁、指纹、Wi-Fi、KernelSU/susfs 复查。
+
+在第 3 步之前不写内部存储；第 3–4 步之间 Android 无法启动（userdata 文件系统大于分区），USB Armada 和 recovery 仍可用。

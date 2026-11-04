@@ -39,6 +39,11 @@ def main():
     ap.add_argument('--unattended', action='store_true',
                     help='Skip the three-key confirmation so the systemd-boot default entry boots unattended (test images only)')
     ap.add_argument('--efi-menu', action='store_true', help='With --efi-esp: systemd-boot menu with an EFI hello entry and Reboot (EFI reset returns to Android), driven by the keys (implies --keys)')
+    ap.add_argument('--esp-ufs', metavar='PARTLABEL',
+                    help='Boot path: load systemd-boot and --esp-dtb from the FAT partition PARTLABEL on UFS LUN --esp-lun '
+                         '(read-only) and bootefi it with that DTB; no block or key tests. Falls back to Android.')
+    ap.add_argument('--esp-lun', type=int, default=0)
+    ap.add_argument('--esp-dtb', default='/dtbs/qcom/sm8750-oneplus-pad2pro.dtb', help='DTB path inside the --esp-ufs partition')
     ap.add_argument('--ufs-trace', action='store_true', help='Debug with --ufs-blk: stack-frame check around doorbells after board init; a main_loop re-entry halts with no further UFS command')
     ap.add_argument('--ufs-blk-ramdisk', action='store_true', help='QEMU test only: opdufs served from a RAM extent table instead of UFS (implies --ufs-blk); never boot it on the device')
     ap.add_argument('--ufs-wake', action='store_true', help='With --ufs-read: START STOP UNIT to Active from Sleep/PowerDown, then restore and verify the original power mode (implies --ufs-read)')
@@ -50,7 +55,12 @@ def main():
         ap.error('--esp-blob needs --efi-esp')
     if a.linux and not (a.efi_menu and a.linux_dtb and a.linux_initrd):
         ap.error('--linux needs --efi-menu, --linux-dtb and --linux-initrd')
-    a.keys |= a.efi_menu
+    if a.esp_ufs and (a.efi_esp or a.efi_menu or a.ufs_blk_ramdisk and not a.unattended):
+        ap.error('--esp-ufs replaces --efi-esp/--efi-menu (QEMU ramdisk runs need --unattended)')
+    if a.esp_ufs and not all(c.isalnum() or c in '_-' for c in a.esp_ufs):
+        ap.error('--esp-ufs PARTLABEL must be alphanumeric')
+    a.keys |= a.efi_menu or bool(a.esp_ufs)
+    a.efi_hello |= bool(a.esp_ufs)
     a.efi_hello |= a.efi_esp is not None
     a.ufs_blk |= a.ufs_blk_ramdisk or a.efi_hello or a.keys
     if a.ufs_trace and not a.ufs_blk:
@@ -186,19 +196,41 @@ def main():
                            ['opd_android', 'echo OPD2413_HALTED Android return refused after re-entry'])
                 tests.extend(['if test -n "${opd_ran}"; then echo OPD2413_REENTERED main_loop restarted bootcmd',
                               *reentry, 'while test 1 = 1; do sleep 3600; done', 'fi', 'setenv opd_ran 1'])
-                step('fatinfo', 'fatinfo opdufs 4:2a', False)
-                for path in ['/image/adsp.b00', '/image/adsp.b09', '/image/adsp.b38']:
-                    tests.append(f'echo OPD2413_FILE fat {path}')
-                    step('load', f'load opdufs 4:2a {load} {path}', False)
+                if not a.esp_ufs:
+                    step('fatinfo', 'fatinfo opdufs 4:2a', False)
+                    for path in ['/image/adsp.b00', '/image/adsp.b09', '/image/adsp.b38']:
+                        tests.append(f'echo OPD2413_FILE fat {path}')
+                        step('load', f'load opdufs 4:2a {load} {path}', False)
+                        tests.append(f'hash crc32 {load} ${{filesize}}')
+                    step('ext4ls', 'ext4ls opdufs 4:2d /adsp', True)
+                    tests.append('echo OPD2413_FILE ext4 /adsp/AudioSphereModule.so.1')
+                    step('load', f'load opdufs 4:2d {load} /adsp/AudioSphereModule.so.1', False)
                     tests.append(f'hash crc32 {load} ${{filesize}}')
-                step('ext4ls', 'ext4ls opdufs 4:2d /adsp', True)
-                tests.append('echo OPD2413_FILE ext4 /adsp/AudioSphereModule.so.1')
-                step('load', f'load opdufs 4:2d {load} /adsp/AudioSphereModule.so.1', False)
-                tests.append(f'hash crc32 {load} ${{filesize}}')
-                tests.append('echo OPD2413_BLK_TESTS_END')
-                if a.keys and not a.unattended:
+                    tests.append('echo OPD2413_BLK_TESTS_END')
+                if a.keys and not a.unattended and not a.esp_ufs:
                     step('keys', 'opd_keys 30', False)
-                if a.efi_hello:
+                if a.esp_ufs:
+                    # Installed system: systemd-boot and the DTB from the ESP
+                    # partition on UFS. The entries come from armada-efi-update
+                    # and carry no devicetree line, so bootefi passes the DTB
+                    # (dtbloader does not know this tablet and leaves it).
+                    # Without a usable ESP the observer returns to Android.
+                    fdt_load = 'c4000000'
+                    esp = f'opdufs {a.esp_lun}:${{opd_esp_part}}'
+                    efi = ['setenv opd_esp_ok 0']
+                    step('esp_part', f'part number opdufs {a.esp_lun} {a.esp_ufs} opd_esp_part', False, efi)
+                    efi.append(f'if test "${{r}}" = 0; then echo OPD2413_ESP {a.esp_ufs} is partition ${{opd_esp_part}} of LUN {a.esp_lun}')
+                    step('esp_dtb', f'load {esp} {fdt_load} {a.esp_dtb}', False, efi)
+                    efi.append('if test "${r}" = 0; then echo OPD2413_ESP dtb 0x${filesize} bytes')
+                    step('esp_load', f'load {esp} {load} /EFI/BOOT/BOOTAA64.EFI', False, efi)
+                    efi.extend(['if test "${r}" = 0; then setenv opd_esp_ok 1; fi', 'fi', 'fi'])
+                    efi.extend(['if test "${opd_esp_ok}" = 1; then',
+                                'if test "${opd_keys_on}" = 1; then setenv stdin serial,opdkeys; fi'])
+                    step('esp_boot', f'bootefi {load} {fdt_load}', False, efi)
+                    efi.extend(['setenv stdin serial', f'else echo OPD2413_ESP no bootable {a.esp_ufs} partition', 'fi'])
+                    tests.extend(['if test "${opd_efi_safe}" = 1; then ' + efi[0], *efi[1:],
+                                  'else echo OPD2413_EFI skipped: handoff memory not protected', 'fi'])
+                elif a.efi_hello:
                     # Only after the observer reserved and CRC'd the ABL handoff memory.
                     efi = []
                     step('efi_memmap', 'efidebug memmap', True, efi)

@@ -33,6 +33,7 @@ SELF = "/usr/libexec/armada/armada-installer"
 BOOTIMG = "/usr/libexec/armada/armada-bootimg-update"
 ICON = "armada-installer"
 EFIUPDATE = "/usr/libexec/armada/armada-efi-update"
+DEVICE_ENV = os.environ.get("ARMADA_DEVICE_ENV", "/usr/libexec/armada/device-env")
 RECOVERY = ("To retry from SD, select SD as the boot source in ABL and re-run the installer. "
             "To abandon the internal installation, select UNINSTALL CFW in ABL.")
 
@@ -628,6 +629,28 @@ def require_commands():
         raise Error("Missing required tools: " + ", ".join(missing))
 
 
+def require_abl_managed():
+    """Refuse devices that keep an OEM-signed ABL (ARMADA_ABL_MANAGED=0).
+
+    Their internal storage is shared with the vendor OS through a device
+    specific procedure (OnePlus Pad 2 Pro: kShimC in boot); this installer's
+    userdata resize and SD/ABL recovery path do not apply there.
+    """
+    try:
+        lines = subprocess.run([DEVICE_ENV], capture_output=True, text=True, check=True).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise Error(f"Could not identify the device: {error}") from error
+    env = {}
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep:
+            env[key] = " ".join(shlex.split(value))
+    if env.get("ARMADA_ABL_MANAGED", "1") == "0":
+        name = env.get("ARMADA_DEVICE_NAME") or env.get("ARMADA_DEVICE_ID") or "this device"
+        raise Error(f"The internal installer does not support {name}: it keeps the vendor bootloader "
+                    "and uses its own installation procedure.")
+
+
 def execute(args):
     if os.geteuid() != 0:
         raise Error("This command must run as root")
@@ -639,6 +662,7 @@ def execute(args):
             print(f"Validated source commit: {source.checksum}", flush=True)
         print(f"Source preflight completed in {time.monotonic() - started:.1f} seconds; internal storage was not touched.", flush=True)
         return
+    require_abl_managed()
     device = discover_device(args.device)
     table = read_table(device)
     if args.command == "detect":

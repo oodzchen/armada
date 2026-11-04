@@ -156,6 +156,43 @@ ufs_setro() {
 ufs_stats() {
 	for d in $(ufs_disks); do awk -v d=$d '$3 == d { print "diskstat", $3, "reads", $4, "sectors_read", $6, "writes", $8, "sectors_written", $10, "flushes", $19 }' /proc/diskstats; done
 }
+# opd.ufsguard: keep UFS visible to the booted system for installation, but
+# lock it as /usr/libexec/armada/ufs-guard does later from udev: other LUNs
+# read-only as whole disks, on LUN0 every partition except ARMADA* read-only.
+ufs_guard_apply() {
+	for d in $(ufs_disks); do
+		lun=$(basename "$(readlink -f "/sys/block/$d/device")"); lun=${lun##*:}
+		if [ "$lun" != 0 ]; then blockdev --setro "/dev/$d" 2>/dev/null; continue; fi
+		for p in /sys/block/$d/$d*; do
+			[ -e "$p/partition" ] || continue
+			case "$(sed -n 's/^PARTNAME=//p' "$p/uevent")" in
+			ARMADA | ARMADA_BOOT | ARMADA_ROOT) ;;
+			*) blockdev --setro "/dev/${p##*/}" 2>/dev/null ;;
+			esac
+		done
+	done
+}
+ufsguard() {
+	say 'ufsguard: waiting for UFS LUNs'
+	i=0; prev=-1; stable=0
+	while [ $i -lt 40 ]; do
+		ufs_guard_apply
+		n=$(ufs_disks | wc -l)
+		if [ "$n" -gt 0 ] && [ "$n" = "$prev" ]; then
+			stable=$((stable + 1)); [ $stable -ge 5 ] && break
+		else
+			stable=0
+		fi
+		prev=$n; sleep 1; i=$((i + 1))
+	done
+	ufs_guard_apply
+	writable=
+	for b in /sys/block/sd*; do
+		case "$(readlink -f "$b/device" 2>/dev/null)" in *1d84000.ufs*) ;; *) continue ;; esac
+		for x in $b $b/${b##*/}*; do [ -e "$x/ro" ] && [ "$(cat "$x/ro")" = 0 ] && writable="$writable ${x##*/}"; done
+	done
+	say "ufsguard: $(ufs_disks | wc -l) UFS disks after $i s; writable:$writable"
+}
 ufsprobe() {
 	say 'ufsprobe: waiting for UFS LUNs'
 	i=0; prev=-1; stable=0
@@ -513,7 +550,8 @@ def usbroot(ufs_probe=False):
     if not ufs_probe:
         return USBROOT.replace('\t# UFS_PROBE_HOOK\n', '')
     return UFS_PROBE + USBROOT.replace(
-        '\t# UFS_PROBE_HOOK\n', '\tgrep -qw opd.ufsprobe /proc/cmdline && ufsprobe\n')
+        '\t# UFS_PROBE_HOOK\n', '\tgrep -qw opd.ufsprobe /proc/cmdline && ufsprobe\n'
+                                 '\tgrep -qw opd.ufsguard /proc/cmdline && ufsguard\n')
 
 
 def entry(name, mode, data=b'', ino=1, rdev=(0, 0)):

@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory() as temporary:
 say() {{ echo "$*" >> {t}/say; }}
 blockdev() {{
     case "$1" in
-    --setro) echo "setro $2" >> {calls}; n=${{2##*/}}; for f in {sysblock}/$n/ro {sysblock}/*/$n/ro; do [ -e "$f" ] && echo 1 > "$f"; done; return 0 ;;
+    --setro) echo "setro $2" >> {calls}; n=${{2##*/}}; for f in {sysblock}/$n/ro {sysblock}/*/$n/ro {sysblock}/$n/$n*/ro; do [ -e "$f" ] && echo 1 > "$f"; done; return 0 ;;
     --getsize64) wc -c < "$2" ;;
     esac
 }}
@@ -95,5 +95,26 @@ ufsprobe
         assert (platform / (sysblock / name / 'device').resolve().relative_to(platform) / 'delete').read_text().strip() == '1'
     assert (platform / (sysblock / 'sdc' / 'device').resolve().relative_to(platform) / 'delete').read_text() == ''
     assert 'ufshcd-qcom 1d84000.ufs: fake' in lines
-print('UFS probe: read-only before reading, UFS disks only, digests and removal correct')
+    # opd.ufsguard: same tree, sda2 becomes ARMADA_ROOT. Expect LUN0's other
+    # partitions and the whole other LUN read-only, ARMADA_ROOT and LUN0 itself
+    # writable, the USB disk untouched, and no device removed.
+    for f in sysblock.glob('*/ro'):
+        f.write_text('0\n')
+    for f in sysblock.glob('*/*/ro'):
+        f.write_text('0\n')
+    calls.unlink()
+    deletes = [platform / (sysblock / name / 'device').resolve().relative_to(platform) / 'delete' for name in disks]
+    for f in deletes:
+        f.write_text('')
+    (sysblock / 'sda/sda2/uevent').write_text('DEVTYPE=partition\nPARTNAME=ARMADA_ROOT\n')
+    guard = module.UFS_PROBE.replace('/sys/block', str(sysblock)).replace('/usb/', str(usb) + '/') \
+        .replace('/dev/null', '@NULL@').replace('/dev/', f'{dev}/').replace('@NULL@', '/dev/null')
+    harness = harness.split('\n# Read-only look')[0] + '\n' + guard + '\nufsguard\n'
+    subprocess.run([*SHELL, '-eu', '-c', harness], check=True)
+    setro = sorted(set(calls.read_text().split('\n')) - {''})
+    assert setro == sorted(f'setro {dev}/{n}' for n in ('sda1', 'sdb')), setro
+    said = (t / 'say').read_text()
+    assert 'ufsguard: 2 UFS disks' in said and 'writable: sda sda2\n' in said, said
+    assert all(f.read_text() == '' for f in deletes), 'guard mode must not remove devices'
+print('UFS probe: read-only before reading, UFS disks only, digests and removal correct; guard mode locks all but ARMADA*')
 PY

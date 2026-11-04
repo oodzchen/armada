@@ -24,6 +24,11 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 i = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = i
 loader.exec_module(i)
+# A device-env stand-in for an OpenABL-managed device; the OEM ABL case is tested below.
+DEVICE_ENV_DIR = tempfile.TemporaryDirectory()
+i.DEVICE_ENV = str(Path(DEVICE_ENV_DIR.name) / "device-env")
+Path(i.DEVICE_ENV).write_text("#!/bin/sh\necho ARMADA_DEVICE_ID=ayn-odin-2\necho ARMADA_ABL_MANAGED=1\n")
+Path(i.DEVICE_ENV).chmod(0o755)
 
 
 def table(names=(), device="/dev/sda", sector=4096):
@@ -208,6 +213,24 @@ class PlanningTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_oem_abl_device_is_refused_before_touching_storage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = Path(temporary) / "device-env"
+            env.write_text("#!/bin/sh\necho ARMADA_DEVICE_ID=oneplus-pad-2-pro\n"
+                           "printf '%s\\n' 'ARMADA_DEVICE_NAME=OnePlus\\ Pad\\ 2\\ Pro'\necho ARMADA_ABL_MANAGED=0\n")
+            env.chmod(0o755)
+            args = argparse.Namespace(command="detect", device=None, json=True)
+            with patch.object(i, "DEVICE_ENV", str(env)), patch.object(i.os, "geteuid", return_value=0), \
+                    patch.object(i, "discover_device") as discover:
+                with self.assertRaisesRegex(i.Error, "does not support OnePlus Pad 2 Pro"):
+                    i.execute(args)
+                discover.assert_not_called()
+            with patch.object(i, "DEVICE_ENV", str(Path(temporary) / "missing")), patch.object(i.os, "geteuid", return_value=0), \
+                    patch.object(i, "discover_device") as discover:
+                with self.assertRaisesRegex(i.Error, "Could not identify the device"):
+                    i.execute(args)
+                discover.assert_not_called()
+
     def test_fingerprint_binds_table_and_kernel_device_identity(self):
         t = table()
         with patch.object(i.os, "stat", return_value=argparse.Namespace(st_rdev=os.makedev(8, 0))), patch.object(Path, "read_text", return_value="10\n"):

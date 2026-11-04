@@ -6,4 +6,6 @@ source /usr/lib/armada/storage-lib
 
 # Hide the TryExec marker on internal boot; fail open so the installer surfaces detection errors.
 armada_running_from_internal && exit 0
+# Devices that keep the vendor ABL (OnePlus Pad 2 Pro) use their own procedure.
+[[ "${ARMADA_ABL_MANAGED:-1}" == 0 ]] && exit 0
 install -m 0755 /dev/null /run/armada/installable

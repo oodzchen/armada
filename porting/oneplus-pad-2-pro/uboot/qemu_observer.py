@@ -80,7 +80,7 @@ mark:
 """
 
 def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=False, ufs_nop=False, ufs_link=False, ufs_read=False,
-         loaders=(), blk_ramdisk=False, manifest_blob=None):
+         loaders=(), blk_ramdisk=False, manifest_blob=None, esp_ufs=False, expect=()):
     out.mkdir(parents=True, exist_ok=True)
     (out/'entry.S').write_text(ENTRY + (DROP_EL1 if el==1 else '    ldr x4, =0xb9000000\n    br x4\n'))
     subprocess.run(['aarch64-linux-gnu-gcc','-nostdlib','-static','-Wl,--build-id=none',
@@ -193,12 +193,16 @@ def test(binary, fdt, out, el, handoff=False, ufs_snapshot=None, smmu_snapshot=F
                     assert b'UFS_LINK skipped:' in text
                     assert b'UFS_LINK_FAIL' not in text
                 if blk_ramdisk:
-                    assert b'OPD2413_UFS_BLK ramdisk' in text and b'OPD2413_BLK_TESTS_END' in text
+                    assert b'OPD2413_UFS_BLK ramdisk' in text
+                    # The --esp-ufs boot path runs no block tests.
+                    assert (b'OPD2413_BLK_TESTS_END' in text) != esp_ufs
                 elif ufs_read:
                     assert b'UFS_READ skipped:' in text
                     assert b'UFS_READ_PASS' not in text
                     assert b'UFS_READ_FAIL' not in text
                     assert b'UFS_READ DMA=' not in text
+                for wanted in expect:
+                    assert wanted.encode() in text, f'missing in console: {wanted}'
                 if handoff:
                     qmp('pmemsave',{'val':0xb91ff000,'size':4,'filename':str(out/'handoff.bin')})
                     marker=int.from_bytes((out/'handoff.bin').read_bytes(),'little')
@@ -242,6 +246,8 @@ def main():
     ap.add_argument('--ufs-read', action='store_true', help='Check the read-only survey preflight refuses the fake/absent hardware (requires --smmu-snapshot)')
     ap.add_argument('--loader', action='append', default=[], metavar='FILE@ADDR', help='Extra guest-physical file load')
     ap.add_argument('--manifest-blob', type=Path, metavar='ESP.IMG', help='Append a kShimC manifest with this file as the "OPD2413 ESP" Blob to the kernel sentinel (needs --handoff)')
+    ap.add_argument('--esp-ufs', action='store_true', help='The ramdisk build is a --esp-ufs boot path (no block tests)')
+    ap.add_argument('--expect', action='append', default=[], metavar='TEXT', help='Text that must appear in the console (repeatable)')
     ap.add_argument('--blk-ramdisk', action='store_true', help='Expect the RAM-backed opdufs test build (--ufs-blk-ramdisk) to finish its block tests')
     a=ap.parse_args()
     loaders=[(Path(f).resolve(),int(addr,0)) for f,addr in (s.rsplit('@',1) for s in a.loader)]
@@ -249,6 +255,6 @@ def main():
     if a.ufs_nop and not a.smmu_snapshot:ap.error('--ufs-nop requires --smmu-snapshot')
     if a.ufs_read and not a.smmu_snapshot:ap.error('--ufs-read requires --smmu-snapshot')
     for el in [1,2]:test(a.binary.resolve(),a.fdt.resolve(),a.out.resolve()/f'el{el}',el,a.handoff,a.ufs_snapshot,a.smmu_snapshot,a.ufs_nop,a.ufs_link_check,a.ufs_read,
-                         loaders,a.blk_ramdisk,a.manifest_blob.resolve() if a.manifest_blob else None)
+                         loaders,a.blk_ramdisk,a.manifest_blob.resolve() if a.manifest_blob else None,a.esp_ufs,a.expect)
 
 if __name__=='__main__':main()

@@ -23,6 +23,7 @@ booted_ref=$(armada_booted_ref)
 booted=$(armada_tag_from_ref "$booted_ref")
 target=$(armada_update_target "$booted_ref") || fail "Could not determine the update target"
 read -r repository desired <<<"$target"
+armada_repository_allowed "$repository" || fail "Published Armada images do not support this device; update it with its own builds"
 case "$booted_ref" in ostree-image-signed:*) verified=1 ;; *) verified=0 ;; esac
 
 # Steam suppresses previously applied versions, so successful checks must print a per-build identity.

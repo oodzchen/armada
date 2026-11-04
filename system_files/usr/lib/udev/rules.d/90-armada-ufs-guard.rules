@@ -1,0 +1,10 @@
+# OnePlus Pad 2 Pro: keep Android's partitions on the internal UFS read-only;
+# only Armada's own partitions stay writable (see /usr/libexec/armada/ufs-guard,
+# which does nothing on other devices). Ordered after 60-persistent-storage,
+# which provides ID_PART_ENTRY_NAME.
+ACTION!="add|change", GOTO="armada_ufs_guard_end"
+SUBSYSTEM!="block", GOTO="armada_ufs_guard_end"
+KERNEL!="sd*", GOTO="armada_ufs_guard_end"
+DEVPATH!="*/1d84000.ufs/*", GOTO="armada_ufs_guard_end"
+RUN+="/usr/libexec/armada/ufs-guard $devnode"
+LABEL="armada_ufs_guard_end"

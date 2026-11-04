@@ -526,6 +526,8 @@ static void keys_start(void)
 	if (opd2413_keys_init(&keys, &io)) return;
 	keys_ok = !stdio_register(&dev);
 	if (!keys_ok) printf("OPD2413_KEYS stdio registration failed\n");
+	/* The boot path (build.py --esp-ufs) uses the keys without a key test. */
+	env_set("opd_keys_on", keys_ok ? "1" : "0");
 }
 
 /* opd_keys <seconds>: report presses until all three keys were seen. */

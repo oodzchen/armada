@@ -1,0 +1,35 @@
+#!/bin/sh
+# udev RUN helper for 90-armada-ufs-guard.rules: on the OnePlus Pad 2 Pro,
+# Armada shares the internal UFS with Android. Every block device on it is
+# made read-only except Armada's own partitions on LUN0 (ARMADA, ARMADA_BOOT,
+# ARMADA_ROOT). LUN0 itself stays writable, because a read-only whole disk
+# makes all of its partitions read-only too; its other partitions are locked
+# one by one. Other LUNs are locked as whole disks.
+# Usage: ufs-guard DEVNODE (DEVTYPE and ID_PART_ENTRY_NAME come from udev).
+set -u
+dev=${1:?device node}
+sysfs=${UFS_GUARD_SYSFS:-/sys}
+model=$(tr -d '\0' <"${UFS_GUARD_MODEL:-$sysfs/firmware/devicetree/base/model}" 2>/dev/null)
+[ "$model" = "OnePlus Pad 2 Pro" ] || exit 0
+
+name=${dev##*/}
+case "${DEVTYPE:-}" in
+partition) disk=$(basename "$(dirname "$(readlink -f "$sysfs/class/block/$name")")") ;;
+disk) disk=$name ;;
+*) exit 0 ;;
+esac
+# SCSI address host:channel:target:lun of the disk.
+lun=$(basename "$(readlink -f "$sysfs/class/block/$disk/device")")
+lun=${lun##*:}
+
+lock() {
+	blockdev --setro "$dev" && logger -t ufs-guard "read-only: $dev ${ID_PART_ENTRY_NAME:-}"
+}
+if [ "${DEVTYPE}" = disk ]; then
+	[ "$lun" = 0 ] || lock
+	exit 0
+fi
+case "${ID_PART_ENTRY_NAME:-}" in
+ARMADA | ARMADA_BOOT | ARMADA_ROOT) [ "$lun" = 0 ] && exit 0 ;;
+esac
+lock

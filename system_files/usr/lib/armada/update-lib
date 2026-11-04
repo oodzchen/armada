@@ -254,6 +254,23 @@ armada_desired_channel() {
     if [[ -n "${1:-}" ]]; then echo "$1"; else armada_booted_channel; fi
 }
 
+# Devices that keep the vendor ABL (ARMADA_ABL_MANAGED=0, the OnePlus Pad 2
+# Pro) run images built with their own kernel patches; the published Armada
+# images would not boot there. Refuse those repositories on such devices.
+armada_repository_allowed() {
+    local repository="$1" abl_managed
+    abl_managed=$(
+        assignments=$("${ARMADA_DEVICE_ENV:-/usr/libexec/armada/device-env}" 2>/dev/null) || exit 1
+        eval "$assignments" || exit 1
+        printf '%s\n' "${ARMADA_ABL_MANAGED:-1}"
+    ) || return 1
+    [[ "$abl_managed" != 0 ]] && return 0
+    case "$repository" in
+        "$ARMADA_CANONICAL_REGISTRY"|"$ARMADA_LEGACY_REGISTRY") return 1 ;;
+    esac
+    return 0
+}
+
 armada_update_target() {
     local ref="$1" booted repository desired
     booted="$(armada_tag_from_ref "$ref")"
