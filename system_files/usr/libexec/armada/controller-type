@@ -18,7 +18,7 @@ CONTROLLER_TYPES = {
 }
 
 
-def available_types():
+def device_environment():
     try:
         result = subprocess.run(
             [DEVICE_ENV],
@@ -28,16 +28,22 @@ def available_types():
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
-        return list(CONTROLLER_TYPES)
-    raw = ""
+        return {}
+    environment = {}
     for line in result.stdout.splitlines():
         key, sep, value = line.partition("=")
-        if sep and key.strip() == "ARMADA_IP_TARGETS":
+        if sep and key.strip() in ("ARMADA_IP_TARGETS", "ARMADA_HAS_BUILTIN_GAMEPAD"):
             try:
-                raw = shlex.split(value)[0] if value.strip() else ""
+                environment[key.strip()] = shlex.split(value)[0] if value.strip() else ""
             except ValueError:
-                raw = value.strip()
-            break
+                environment[key.strip()] = value.strip()
+    return environment
+
+
+def available_types(environment=None):
+    if environment is None:
+        environment = device_environment()
+    raw = environment.get("ARMADA_IP_TARGETS", "")
     types = []
     for item in raw.split(","):
         item = item.strip()
@@ -158,11 +164,12 @@ def apply_with_retry(value):
 
 def main(argv):
     command = argv[1] if len(argv) > 1 else "get"
+    environment = device_environment()
     if command == "get":
-        print(load_type(available_types()))
+        print(load_type(available_types(environment)))
         return 0
     if command == "set":
-        types = available_types()
+        types = available_types(environment)
         if len(argv) != 3:
             print(f"usage: controller-type set <{'|'.join(types)}>", file=sys.stderr)
             return 2
@@ -174,7 +181,10 @@ def main(argv):
         save_type(argv[2])
         return 0
     if command == "apply":
-        return 0 if apply_with_retry(load_type(available_types())) else 1
+        if environment.get("ARMADA_HAS_BUILTIN_GAMEPAD", "1") == "0":
+            print("Skipping controller type: this device has no built-in gamepad")
+            return 0
+        return 0 if apply_with_retry(load_type(available_types(environment))) else 1
     print("usage: controller-type get|set|apply", file=sys.stderr)
     return 2
 

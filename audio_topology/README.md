@@ -2,6 +2,10 @@
 
 Source files for Armada's Qualcomm AudioReach topology blobs.
 
+The [OnePlus Pad 2 Pro source and build instructions](oneplus-pad-2-pro/README.md)
+include pinned macro inputs, a verified generator and the local firmware
+preparation needed for an installation image.
+
 Only the generated topology blobs under the following directory are copied into
 the firmware image; the `.m4` sources remain in this directory.
 

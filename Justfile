@@ -158,6 +158,7 @@ build $target_image=image_name $tag=default_tag:
 
     podman build \
         --build-arg "ARMADA_VERSION=${ARMADA_VERSION}" \
+        --build-arg "ARMADA_DEVICE=${ARMADA_DEVICE:-}" \
         --build-arg-file "${REFS}" \
         "${SECRET_ARGS[@]}" \
         --platform linux/arm64 \

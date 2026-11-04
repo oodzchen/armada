@@ -1,8 +1,8 @@
 # 一加平板 2 Pro（SM8750）Android / Armada 双启动方案
 
-> 状态（2026-11-04，开机黑屏已定位根因并修复，待完整镜像验证）：完整 Armada 已通过 RAM/USB 路径进入游戏及桌面模式（历史细节见 19.8–19.13）。约 1/4 开机出现的黑屏，根因是开机 MDSS 复位打断了 ABL 的扫描输出（开启了 programmable fetch），残留的预取请求堵死了 MDSS 读通路。新补丁 1407 在复位前先关 prog fetch、停 INTF、复位 CTL，并要求 VBIF AXI halt 拿到 ACK。临时启动 16/16 通过（§19.23–19.26），补丁已放入 series，尚未提交。Android 保留，仍只做临时启动，尚未固化双启动。
+> 状态（2026-11-04）：完整 Armada 已通过临时启动从 USB 进入桌面和游戏模式。显示黑屏修复 1406/1407 已提交（`98f8101`），临时启动 16/16 通过；桌面网页音频、音量和静音已由用户确认正常（§19.30）。音频内核 1408、拓扑、UCM、固件输入检查及 initramfs 收录已接入源码构建（§19.31）；平板无内置手柄导致的服务误报已修复，系统恢复 `running`、失败单元为 0（§19.32）。完整新镜像及全新可写层冷启动仍待验证。Android 保留，尚未固化双启动。
 > 本文中标注 **【待验证】** 的内容尚未在实机上确认，不能当作事实使用。
-> **继续工作时先读第 19.23–19.26 节（2026-11-04 黑屏根因与 1407 修复），再读 19.8–19.13、20 节；19.14–19.22 是已被证伪的候选，留作历史对照。** 第 17、18 节及更早测试保留为历史对照；其中的旧“下一步”、补丁计数和未实现状态不代表当前进度。不要从已完成的 UFS NOP、EFI、erhai 点屏或 Armada 触控测试重新开始。
+> **继续工作时先读第 19.30–19.33 节（最新音频/镜像源码集成、服务修复与交接），显示问题再读 19.23–19.28。** 第 17、18 节及更早测试为历史对照；其中旧“下一步”、补丁计数和未实现状态不代表当前进度。不要从已完成的 UFS NOP、EFI、erhai 点屏或 Armada 触控测试重新开始。
 
 ## 当前进度与剩余工作
 
@@ -11,14 +11,14 @@
 | 一：采集与备份 | 检查点已通过 | 后续每轮继续核对原镜像与当前槽位 |
 | 二：kShimC 与 Android | 检查点已通过；音量切换、电源确认、默认启动 ColorOS 正常 | 最终镜像形成后还需长期回归 |
 | 三：U-Boot 可行性 | 基本通过：显示、内存、返回 Android、UFS 唤醒/只读/恢复、6 个 LUN 主备 GPT（66/66）、只读块设备上的 FAT16/ext4（4/4 CRC 一致）、EFI loader（ABL 交接内存保留并 CRC 校验）、systemd-boot 菜单（音量/电源键只读输入，Reboot 经 EFI 复位钩子返回 Android）、ESP 作为 kShimC Blob、ExitBootServices 时恢复 UFS | ESP/根文件系统的最终位置；UFS 上的 ESP 需要写入许可 |
-| 四：Armada 设备移植与 USB 试启动 | 基础内核检查点通过：8 核、约 14.5 GiB 可用内存、msm DRM 显示、NT36536 触控事件、ADSP/SOCCP、SCMI v2.0/两个性能域、USB ACM 实时日志；USB NCM（high-speed，约 14.5 MiB/s，双向 SHA-256 校验通过）；完整内核包（1594 个模块、29 份 DTB）已离线构建；五轮均自动返回 ColorOS | 完整 Armada rootfs（构建中）及 RAM 启动（C）；DSI PLL/面板命令告警；GPU、Wi-Fi 等硬件 |
+| 四：Armada 设备移植与 USB 试启动 | 完整系统已进入桌面/游戏模式；显示、触控、磁吸键盘、触控板、Wi-Fi 和桌面音频已实测。配套内核/1594 模块及 USB 持久层工作；1408 音频源码、拓扑和 UCM 已纳入构建，服务失败项已清零 | 完整新镜像/全新可写层冷启动；逐颗扬声器、麦克风增益和开机 APM 超时；挂起恢复与长期稳定性 |
 | 五：安装与固化双启动 | 未开始；仍使用临时启动镜像 | 确定系统存放位置、最终 boot 镜像、升级/恢复方案及多轮双系统启动回归 |
 
-**下一项工作**：1407 已在完整系统中通过桌面和游戏模式验证（§19.27–19.28，当前镜像 armada16）。接下来是音频：缺少 `OnePlus-Pad-2-Pro-tplg.bin` 拓扑，扬声器链路需要新写（§19.28）。其他待办：断电冷启动验证；去掉 1406 中无效的 DPU 侧 teardown 并做回归；USB 3 方向切换；U 盘镜像里的 dracut `initramfs.img` 仍是旧模块。
+**下一项工作**：音频桌面播放已真机通过（§19.30）：用户确认网页视频出声、音量与静音正常；UCM 修复已持久写入 U 盘并放入仓库源码。§19.31 已将 audio1 内核、拓扑和 UCM 纳入源码构建，私有固件有校验安装工具，initramfs 有显式收录检查。下一步从新构建镜像用全新可写层做冷启动音频回归，检查开机 APM 超时是否重现。其他待办：逐颗扬声器/麦克风增益验收；去掉 1406 中无效的 DPU 侧 teardown 并回归；USB 3 方向切换；U 盘镜像里的 dracut `initramfs.img` 仍是旧模块。
 
-**剩余工作量**主要在：完整 Armada 用户空间、USB 主机/存储或网络路径、GPU/Wi-Fi 等驱动与固件、根文件系统及 ESP 的安装位置、双启动固化与升级/恢复方案。显示和触控已完成内核级初验，桌面交互、GPU 加速、休眠和长期稳定性仍待验证。USB ACM 通信成功不能代替 USB 主机/存储测试。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
+**剩余工作量**主要在：从源码完整重建新镜像并完成全新可写层/冷启动回归、其余外设和休眠稳定性、内部存储与 ESP 布局、双启动固化及升级/恢复方案。桌面/游戏模式、USB 根文件系统和 Wi-Fi 已有实测记录，不再列为尚未启动。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
 
-**原 Android 基线状态**（2026-11-03；本轮每次返回复核槽位和 boot 哈希）：ColorOS 正常启动，b 槽，`boot_b` SHA-256 仍为 `0e5afd65d6c92bb12c3a319ddcbcfc9ffaac6a68e22c567c4a6ef1cf82705e49`；用户确认解锁、指纹、Wi-Fi、KernelSU/susfs 全部正常。所有实验均为 `fastboot boot` 临时启动，未刷写分区、未改 GPT、未格式化、未刷 OEM ABL；Linux 冒烟 DT 禁用 UFS/PHY，块设备仅 loop0–7。普通重启仍进入原有 Android，尚未固化 kShim 菜单。文档本身不提交。
+**原 Android 基线状态**（2026-11-03；本轮每次返回复核槽位和 boot 哈希）：ColorOS 正常启动，b 槽，`boot_b` SHA-256 仍为 `0e5afd65d6c92bb12c3a319ddcbcfc9ffaac6a68e22c567c4a6ef1cf82705e49`；用户确认解锁、指纹、Wi-Fi、KernelSU/susfs 全部正常。所有实验均为 `fastboot boot` 临时启动，未刷写分区、未改 GPT、未格式化、未刷 OEM ABL；Linux 冒烟 DT 禁用 UFS/PHY，块设备仅 loop0–7。普通重启仍进入原有 Android，尚未固化 kShim 菜单。按本轮用户“更新文档，然后提交”的要求，本方案进度与源码一并提交；原始记录和私有固件仍保留本地。
 
 ---
 
@@ -1160,6 +1160,86 @@ CRC verified; 0 bytes recovered relative to first replica
 - **游戏模式通过（用户实测）**：第一次停在 Steam 加载界面，原因是直连 Steam 超时（`store.steampowered.com` 直连超时，走用户局域网 HTTP 代理返回 200）。代理写在 `/etc/environment.d/90-opd-proxy.conf`（只在 U 盘可写层；Steam 跑在 systemd 用户服务里，从 environment.d 继承变量，`no_proxy` 排除本机和局域网）。重启后 Steam 先安装上次已下载的客户端更新（启动画面显示 "Still starting…"，约 3 分钟），随后进入界面，触屏、键盘、触控板都正常。
 - **音频：没有声卡**。ADSP 在运行，q6apm/q6prm、LPASS 宏、WCD939x、6 颗 AW88261、sc8280xp 声卡驱动和 SoundWire 都已加载，但 `qcom-apm: tplg firmware loading qcom/sm8750/OnePlus-Pad-2-Pro-tplg.bin failed -2`，于是 `snd-sc8280xp: failed to instantiate card -2`。DT 声卡链路：扬声器 CPU DAI 40、WCD 放音 113、WCD 录音 120、DP 104。KONKR 拓扑里的 WCD/DP 段可以复用；扬声器端口不同（KONKR 用 `SECONDARY_MI2S_RX`），需要为这台平板编写 `audio_topology/sm8750/SM8750-OnePlus-Pad-2-Pro.m4` 并生成拓扑文件，属于第 G 项音频移植。
 
+### 19.29 G 音频移植（进行中，2026-11-04）
+
+- **输入来源**：本机 `~/github/onepluspad-2pro-mainline`（erhai 的用户态打包仓库）提供了：
+  - 拓扑源码 `packaging/audio/OnePlus-Pad-2-Pro.m4`，以及自定义宏 `module_tdm.m4`、`module_mfc_cfg.m4`；
+  - 固定版本的 audioreach-topology 源码包 `993a17dc`，SHA-256 `58e0fa0a…` 已核对，BSD-3-Clause；
+  - UCM `ucm2/{conf.d,Qualcomm}/sm8750/OnePlus-Pad-2-Pro*` 和 `erhai-audio-speaker` 脚本。
+- **拓扑**：在一次性的 Fedora 44 容器里生成（`alsa-topology-utils` 1.2.16、m4 1.4.21，不改主机）：`m4 -I packaging/audio -I <audioreach-topology> OnePlus-Pad-2-Pro.m4` → `alsatplg`，得到 `OnePlus-Pad-2-Pro-tplg.bin`（17292 字节，`d2fd4668…`）。三条后端未定义的告警是预期的。erhai `build-debs.py` 的 `check_topology`/`check_module_configs` 校验通过；扬声器 MFC 的 2→8 映射为 `L R L R L R L R`。产物在 `audio1/tplg/`。
+- **功放固件**：用 payload-dumper-go 从本机当前 OTA（16.0.10.600 CN01）只读解出 odm（EROFS），在容器里用 `dump.erofs` 取出 `firmware/aw882xx_acf.bin`（4976 字节，`97ae5a34…`），与 erhai 清单一致，安装为 `awinic/erhai/aw88261_acf.bin`。是 ROM 内容，不是单机校准数据。
+- **内核（未提交，候选 audio1）**：Armada 的 audioreach 完全不支持 TDM。erhai 的 TDM 支持混在提交 `e5493a910` 里（标题写的是面板参数，实际是大合并），只能按文件、以 erhai 相对 v7.2.14 的差异移植：
+  - 能干净应用的：`snd_ar_tokens.h`、`audioreach.h`、`topology.c`、`q6apm-dai.c`、`common.c/h`（TDM 槽解析、位时钟反相、`qcom_snd_be_hw_params_fixup`）、`qcom/Kconfig`（select `SND_SIMPLE_CARD_UTILS`）、`aw88261.c`。
+  - 三方合并，冲突手工解决：
+    - `audioreach.c`：保留 Armada 0007 的声道映射，加上 erhai 的 `bits_per_sample`；
+    - `q6apm-lpass-dais.c`：保留 Armada 的挂起/恢复，加上 erhai 的 `q6tdm_ops`，取时钟处加 TDM `case`；
+    - `q6prm.h`、`q6prm-clocks.c`：MCLK 和 TDM 的时钟 ID 都保留。
+  - `sc8280xp.c` 不采用 erhai 的整体重构：
+    - 只在 hw_params 开头加 `PRIMARY_TDM_RX_0…QUINARY_TDM_TX_7` 分支，交给移植来的 `sc8280xp_tdm_hw_params`（设 CPU 位时钟，与 erhai 的 sm8750 配置一致）；
+    - BE fixup 末尾调用 `qcom_snd_be_hw_params_fixup` 读取 `convert-*`。
+    - 只有 OPD2413 的 DTS 用到 TDM 和 `convert-*`，其他机型的执行路径不变。
+  - 暂不移植：
+    - erhai 的 `wcd939x.c` 改动（按声道记端口开关的修正，KONKR 也在用这个驱动）；
+    - lpass 宏约 630 行的 PM 重构；
+    - `soundwire/qcom.c`。
+  - `q6dsp-lpass-ports.h` 和 `codecs/Kconfig` 已经与 erhai 一致。
+  - W=1 无警告，模块 0 警告；修改前的文件存于 `audio1/before/`（与 clean-series 逐字节一致）。
+- **构建注意**：在共享源码树上跑过 `W=1` 后，vdso 会重新编译，导致 vmlinux 重新链接，于是这次的内核变成 `2fc33641…`，1594 个模块也重新生成。源码与之前相同（`overlay.ko` 逐字节一致，说明 BTF 没变），但仍要作为一套整体部署。以后不要在这棵树上用 W=1，或改用独立的 O= 目录。
+- **armada17**（`3aa77401…`）= armada16 + 内核 `2fc33641` + 配套 initramfs。新模块、拓扑、功放固件、UCM、`erhai-audio-speaker` 和 `/etc/systemd/sleep.conf.d/90-opd-no-suspend.conf` 都写入了 U 盘可写层（1618 个文件逐个校验，清单 `opd/audio1.sha256`）。
+- **挂起问题**：armada16 自动挂起后死机，无法唤醒（第 H 项，挂起/恢复尚未验证），用户只能拔 U 盘，之后 `e2fsck` 回放日志、清理了两个孤立 inode。测试系统已禁止挂起和休眠。
+- **armada17 第 1 次（音频授权 1/3）失败，是我的部署错误**：Fedora 44 的 `/usr/sbin` 是指向 `bin` 的符号链接，安装脚本在可写层建了真实的 `usr/sbin` 目录（只放了 speaker 脚本），把整个 `/usr/sbin` 遮住了。结果 modprobe（retcode 127）、wpa_supplicant（EXEC ENOENT）、zram、binfmt 等 12 个单元失败，Wi-Fi 显示红叉，声卡模块也没能加载（只加载了 56 个模块）。日志在 `armada17/a17-{dmesg,journalctl}.txt`。修复：删除可写层的 `usr/sbin`，脚本改放 `/usr/bin`。部署流程补上了用只读镜像（`unsquashfs -lls`）核对目标路径类型的检查，已用 `usr/sbin` 做反例验证。**教训：往 overlay 可写层离线写文件时，必须对照下层的合并视图检查路径类型，不能只看可写层。**
+- 当前：armada17 第 2 次已发送（音频授权 2/3），等待用户进入桌面后用 SSH 检查声卡。扬声器按 erhai 的设置保持默认关闭，用户同意低音量试听。
+
+### 19.30 桌面无输入/输出设备：UCM 修复及播放验证（2026-11-04）
+
+- **场景与版本**：armada17 第 2 次，Wi-Fi SSH 调试，USB 持久 overlay；没有重启、更换内核或写 Android 分区。Armada 工作树基线 `2e18cf21`，boot SHA-256 `3aa77401ad784114a4dfe9f679aa1378882610bc09642c5f6cc4cbd089a946b8`，内核 `2fc3364136c18613d4543f19ce715889cb6e3f721aa4167fe1a1637539e877c7`，7.2.6 #29；ALSA 1.2.16.1、PipeWire 1.6.11、WirePlumber 0.5.19。所有本轮原始证据在 `output/opd2413-stage4/audio2/`。
+- **基线**：声卡、三个 PCM、六颗 AW88261 及 ACF 均已加载，故 §19.28 的缺拓扑已解决。桌面只有 Dummy Output、声卡 profile 为 off；`snd_use_case_mgr_open("hw:0")=-2`（`baseline.txt`）。
+- **四个配置问题与修复**：
+  1. ALSA 查找 `CardLongName`，实际为 `armada-OnePlusPad2ProU_Bootobserver`，已部署文件却只有 `OnePlus-Pad-2-Pro.conf`。加当前长名称到原配置的符号链接后，UCM open 和 HiFi verb 均返回 0。查找规则以设备上的 `/usr/share/alsa/ucm2/ucm.conf` 为证，也核对了 [ALSA 官方 UCM 文档](https://www.alsa-project.org/alsa-doc/alsa-lib/group__ucm__conf.html)。
+  2. erhai 的 UCM 引用当前 Armada 内核没有的 `TX0/1 HPF cut off`，Mic enable 返回 -2。两项改用 `ControlExists` 条件；必要的路由控件仍严格执行，避免掩盖缺失。
+  3. 扬声器被 `/run/erhai-audio/speaker-enabled` 临时标志控制，重启后消失。改为 HiFi 始终包含 Speaker；六颗功放从原配置 350 改为保守的 270（-22.5 dB），DSP gain 保持 8192（Q13 unity），桌面使用软件音量。
+  4. 扬声器 FE→BE 路由原来在 Speaker EnableSequence；PipeWire 在 enable device 前探测 PCM，open 返回 EINVAL，于是丢弃整个 HiFi profile。把该路由与已有麦克风 FE 路由一起放到 SectionVerb，HiFi 随即 supported（`wp-debug.txt`、`pipewire-route.txt`）。
+- **源码与部署**：新增 `system_files/usr/share/alsa/ucm2/Qualcomm/sm8750/OnePlus-Pad-2-Pro/{HiFi,Speaker}.conf` 及 `conf.d/sm8750/{OnePlus-Pad-2-Pro,armada-OnePlusPad2ProU_Bootobserver}.conf`，由现有 `40-vendor-system-files.sh` 自动安装。来源为本机 erhai 用户态仓 `9762c0994e2b5acd672be2ddbda680fd61f1cad6` 的 BSD-3-Clause UCM，删除不适用于本次验证的历史音量断言。源文件与设备文件 SHA-256 一致（`final-check.txt`）：主配置 `f7cecda0…`、HiFi `d2b937ad…`、Speaker `8afb84af…`。修改前设备配置备份在 `/var/lib/armada/audio2-backup/OnePlus-Pad-2-Pro/`。未提交。
+- **机器验证**：UCM Mic/Speaker enable、disable 均返回 0；ALSA 48 kHz/S16_LE/双声道全零播放 3 秒返回 0（`silent-test2.txt`）。真实 PipeWire/Pulse 路径三次 paplay 返回 0，PCM 为 RUNNING、MMAP_INTERLEAVED，硬件指针推进；内置麦克风录到 997 Hz 测试信号，40%→70% 音量时两通道的单频幅度约增加 5 倍（`loopback-pa.txt`、`recordings/analysis.json`）。静音录音夹有环境/瞬态峰值，不能据它声称静音信号为零；静音判定采用用户实际听感。第一次脚本使用本机未安装的 pw-play/pw-record，返回 127；已改用系统已有的 paplay/parec，保留失败记录。
+- **用户验收：真机通过**。用户明确确认“能出声，音量和静音均正常”，对应桌面网页视频。尚未逐颗验证六个扬声器，麦克风仅有测试音采集证据，语音增益/音质没有完整验收。
+- **持久性检查**：删除 `/run` 标志，关闭 WirePlumber，将两条 FE 路由清零，再启动 WirePlumber，自动恢复 HiFi、Speakers、Internal microphones；六个 Amp volume 仍为 270，DSP 为 8192（`final-check.txt`）。已关闭临时调试日志并 sync。此检查排除了临时标志及已开通 FE 路由的依赖，**不等同冷启动验证**。
+- **日志边界**：本轮修复/播放期间没有新增 APM、AW88261 或 ASoC 错误；本次启动早在 10:20:03 就有一次 `qcom-apm CMD timeout [1001021]`，以及 WCD 缺 mbhc buttons 属性警告。因此只关闭“桌面无声音设备、网页无声”问题，不宣称整个启动音频链路零错误。证据 `final-journal.txt`。
+- **当前设备与交接**：平板仍在 Armada 桌面，Wi-Fi 在线，默认扬声器音量 40%、未静音；没有遗留录音/播放测试进程。音频测试资料在主机忽略目录和设备 `/tmp/opd-audio2`。唯一下一步是冷启动音频回归；本轮没有占用新的临时启动次数。原来的 `erhai-audio-speaker` 开关脚本已被始终启用的 UCM 取代，不再用于控制扬声器。
+
+#### 音频临时处理 / 技术债（统一登记入口）
+
+| 项目 | 位置、原因与影响 | 去除条件 |
+|---|---|---|
+| 当前 U-Boot/DMI 长名称别名（§19.31 已解决） | `conf.d/sm8750/armada-OnePlusPad2ProU_Bootobserver.conf`；精确匹配本轮启动链，其他 SM8750 设备不受影响，但更换 DMI 后可能失配 | 已改为按 CardName 窄范围匹配，源码及平板旧别名均已移除；新镜像冷启动另验 |
+| 保守功放增益 | `Speaker.conf` 中六颗功放 270/-22.5 dB；当前没有原厂 DSP 扬声器保护，最大响度低于原厂 | 完成保护及各路扬声器测试后再决定产品增益，不直接恢复原厂 350 |
+| 已部署候选未进入完整构建（§19.31 源码已解决） | §19.29 audio1 内核改动、拓扑和私有 ACF 仍在候选/USB 层；完整重建还不能复现当前音频能力 | 内核补丁、拓扑源码/生成器、固件输入和构建检查已纳入；完整镜像/冷启动仍为验收待办 |
+
+### 19.31 音频源码与镜像构建集成（2026-11-04）
+
+- 用户明确要求“从源码层面修复”。路线和实验判据在 `output/opd2413-stage4/audio-source/PLAN.md`；本轮不更换正在运行的内核，不重启或修改 Android。
+- **内核**：新增 `1408-ASoC-qcom-add-opd2413-tdm-audio.patch` 并加入 `packages/kernel/patches/series`，PATCHES.md 记录完整来源 `e5493a9107c16b53c58f477b7619ed511d4fe68e`。13 个修改前备份全部与原 clean-series 源码一致，补丁 55 个 hunk 以 `-F0` 应用后，13 个文件逐字节等于已实测的 audio1 源码。证据 `patch-replay.log`、`source-equivalence.json`。没有引入额外内核行为，也没有为了本轮重新链接运行中的内核。内核包内容哈希已改变，旧缓存不再匹配；构建继续将内核及模块作为同一套打包。
+- **拓扑**：新增 `audio_topology/oneplus-pad-2-pro/`，包含板级 m4、两份扩展宏、BSD-3-Clause 许可证、固定上游 `993a17dcb672357998a463a73f120064d6c74f4f` 及归档/产物哈希、生成器和构建说明。实测 blob 进入 `system_files/usr/lib/firmware/qcom/sm8750/OnePlus-Pad-2-Pro-tplg.bin`。Fedora 44 隔离容器重新生成 SHA-256 `d2fd46689b0232263380984cf4a23b5261a98ed68e5695b1be96a8c25f47a107`，与实机产物完全一致；三条内核提供的 BE widget 告警保持预期。初次容器因 SELinux 拒绝输出目录写入，改为仅该临时容器 `label=disable` 后成功，没有修改主机目录标签。
+- **UCM 长名称根治**：新增 `conf.d/sm8750/sm8750.conf` 驱动 fallback，仅在 `${CardName} == OnePlus-Pad-2-Pro` 时包含板级配置。删除上一轮的 DMI 长名称别名，不再绑定 `U_Bootobserver`。平板移除旧别名后 `snd_use_case_mgr_open(hw:0)=0`、`_file=sm8750.conf`；重启 WirePlumber 后 Speakers/Mic 保持正常（`stable-ucm.txt`）。新配置没有 `/run` 开关依赖，功放增益保持 270、DSP unity。
+- **私有固件和镜像**：`prepare_audio_firmware.py` 先核对所有输入，再向 Git 忽略目录复制 60 份固件；哈希清单保存在 `system_files/usr/share/armada/firmware/`，不含原始镜像路径/设备身份数据。新 `41-check-oneplus-audio.sh` 接入系统构建，在 `ARMADA_DEVICE=oneplus-pad-2-pro` 时强制检查固件、拓扑和 UCM。未显式选择 OnePlus 目标而存在任一私有目录时失败，防止本地残留输入混入普通镜像。Containerfile 与 Justfile 传递该参数；本机构建输入已准备。完整命令见 `audio_topology/oneplus-pad-2-pro/README.md`。
+- **initramfs**：`55-generate-initramfs.sh` 对显式 OnePlus 目标，将清单全部固件和拓扑加入 dracut `--install`，并延续既有 `lsinitrd` 精确路径检查。完整构建仍按 step 20 安装同套内核/模块后才生成 initramfs。临时 Armada 容器已用 audio1 配套内核/模块完成该步骤，61 个 OnePlus 固件/拓扑文件均出现在真实归档中，产物 84388227 字节、SHA-256 `ff408d81bb38f3c44419389e4e00bce0816166ab7deb475705ad8a6adf15afd9`。证据 `initramfs-build.log`、`rebuilt-initramfs.list`、`initramfs-validation.json`；没有部署到平板或覆盖现有 U 盘。
+- **构建检查**：`tests/oneplus-audio-image-test.sh` 已通过：完整输入成功；目标缺全部固件、缺 ACF、损坏 ACF、缺稳定 UCM 均失败；仅残留 ADSP 或仅残留 ACF 的通用镜像均失败。准备工具的损坏输入负对照确认不会写出一部分目标文件。shell 语法和 Python 编译检查通过，独立审查未发现剩余阻塞。私有目录 `git check-ignore` 通过、没有已跟踪文件。
+- **当前状态与边界**：源码集成已完成，本轮提交范围见 §19.33；平板仍在同一次 Armada 桌面运行，Wi-Fi 在线，重启声音服务后保留用户当前音量 15%。唯一下一步是完整新镜像、全新可写层及冷启动音频验收；没有把源代码/构建检查通过当作安装镜像真机通过。
+
+### 19.32 Konsole 提示 armada-controller-type.service 失败（2026-11-04）
+
+- **基线**：同一次 armada17 / 7.2.6 #29 / InputPlumber 0.83.0；InputPlumber 正常运行，但 `devices list` 和 D-Bus 均没有 CompositeDevice。平板没有内置游戏手柄，键盘/触控板走各自输入路径。原 `controller-type apply` 固定重试 30 次仍没有手柄，于 10:20:18 返回 1，系统一直 degraded，打开 Konsole 时显示 failed unit。证据 `output/opd2413-stage4/controller1/baseline.txt`。
+- **源码修复**：新增设备能力 `ARMADA_HAS_BUILTIN_GAMEPAD`，defaults=1，OnePlus profile=0，经 `device-env` 导出。`controller-type` 读取一次设备环境，只有自动 `apply` 且该值明确为 0 时记录原因并成功跳过；显式 `get/set` 保留。没有配置、环境读取失败及其他掌机仍执行原应用/错误路径，不会掩盖真正的手柄故障。文件位于 `system_files`，既有镜像复制流程会安装，无运行时临时开关。
+- **测试**：新增 `tests/controller-type-test.sh`，通过平板两种 model 无等待/无保存副作用、掌机成功与缺手柄失败、平板显式设置外接手柄、旧环境兼容等检查；原 `input-calibration-test.sh` 和 `perf-settings-test.sh` 通过。独立审查无阻塞。计划和证据在 `controller1/`。
+- **部署与真机结果**：同步 4 个源码文件，重启此 oneshot 服务；11:30:08 返回 `status=0/SUCCESS`、`active (exited)`，日志明确 `Skipping controller type: this device has no built-in gamepad`。`systemctl --failed` 为 0，`systemctl is-system-running` 为 `running`；InputPlumber 仍 active（`live-fixed.txt`）。当前 Konsole 的新会话不应再报告该失败项；历史终端输出本身不会被改写。
+- **交接**：平板仍在 Armada 桌面、Wi-Fi 可用。服务未禁用/屏蔽；本轮未重启系统，后续完整新镜像冷启动时同时复核此服务。当前唯一下一步仍为新镜像及全新可写层音频/启动回归。源码修改纳入 §19.33 本轮提交。
+
+### 19.33 本轮提交与最新交接（2026-11-04）
+
+- 按用户“更新文档，然后提交”的最新指令，本次提交包含：§19.29–19.31 的音频 1408 内核补丁/series/provenance、拓扑源码/生成器/生成物、UCM、私有固件哈希/准备工具、镜像目标及检查、initramfs 收录，§19.32 的无内置手柄能力与服务修复，以及相关测试和构建说明。此前“不提交本文档”的限制在本轮由此明确指令替代；设备标识、原始日志、私有固件及无关的对话导出仍不纳入提交。
+- 验证结果：13 文件/55 hunk 还原实测音频源码；固定上游拓扑重建 SHA-256 一致；实际 dracut 归档包含全部 61 份 OnePlus 固件/拓扑；稳定声卡名称 UCM 真机识别；用户确认网页音频、音量和静音；手柄服务真机返回 0、failed units=0、系统 running。新增音频镜像及手柄测试、原 input-calibration/perf-settings、shellcheck/语法检查均已通过，详情与证据见前述小节。
+- 当前平板仍为 armada17 的 USB 桌面会话，Wi-Fi 可用，最近保留用户音量 15%；本轮无待运行的设备测试，无重启、分区或 Android 修改。代码提交不等于已生成完整安装镜像。
+- **唯一下一步**：用显式 `ARMADA_DEVICE=oneplus-pad-2-pro` 和已校验的本地固件重建完整内核包及镜像，配套新 initramfs，用全新可写层临时启动并验证冷启动音频/服务；同时追踪早期开机 APM 超时。现有 USB 里的旧 dracut 文件仍未替换。内部安装和固化双启动继续按第 I 项另行核对。
+
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 
 | 内容 | 位置 |
@@ -1221,4 +1301,20 @@ python3 porting/oneplus-pad-2-pro/linux/decode_smoke.py \
 - 继续同时保留 USB 实时日志与 25 份 pmsg 状态；只接受完整 SHA-256 验证的恢复结果。保存的原始 RAM 文本可能有位损坏，不能直接据此宣布通过。
 - Linux 内部 UFS 仍保持关闭，直至另行准备专门的只读存储测试。不得把 U-Boot 的只读 UFS 成果当作 Linux UFS 驱动已通过；也不运行 erhai 的分区/刷写/切槽安装脚本。
 - 始终保留槽位 b 与已备份的原 boot 对照，不切换旧槽 a，不替换 OEM ABL。涉及最终安装前，先完成具体目标、恢复文件和写入内容的核对；当前尚无已选定的可写目标。
-- 只提交实测/离线检查通过的对应代码。按用户要求，方案文档、原始调试记录与私有固件继续留在本地，不纳入提交。
+- 只提交实测/离线检查通过的对应代码。按本轮用户要求更新并提交方案文档和源码；原始调试记录与私有固件继续留在本地，不纳入提交。
+
+### 20.4 最终安装镜像的持久化要求（用户明确，2026-11-04）
+
+用户后期要用镜像安装系统；所有验收通过的修复必须进入镜像的可复现构建输入，不能依赖现有测试 U 盘的 overlay、手工 SSH 修改或 `/run` 临时文件。“测试 U 盘重启保留”不能作为“安装镜像已包含”的判据。
+
+音频当前构建覆盖情况：
+
+| 内容 | 当前是否进入镜像构建输入 | 最终要求 |
+|---|---|---|
+| §19.30 UCM 修复 | 是，已放在 `system_files` 工作树，`Containerfile` 的 ctx COPY 与 `40-vendor-system-files.sh` 会安装；纳入本轮源码提交 | 随源码保存，镜像内校验文件及配置匹配 |
+| §19.29 audio1 内核修改 | 是，§19.31 的 1408 补丁已加入 series，逐字节还原实测源码 | 使用新内容哈希的内核包，内核/模块同套构建 |
+| OnePlus AudioReach 拓扑 | 是，§19.31 保存 m4、宏、固定上游、生成器及实测 blob，已验证可重建 | 镜像构建检查拓扑 SHA-256 |
+| AW88261 ACF 和设备专用 ADSP 固件 | §19.31 提供准备工具和哈希清单，本地 60 份输入已准备；二进制继续 Git 忽略 | 显式 OnePlus 构建目标要求全部输入匹配，否则失败；不公开私有固件 |
+| initramfs | §19.31 构建脚本已显式收录 OnePlus 固件/拓扑并检查归档；当前 U 盘旧 dracut 文件未替换 | 完整新镜像用同套内核/模块重建，冷启动验收 |
+
+**最终验收门槛**：从保存的源码和明确的私有输入重新构建镜像，检查内核、模块、DTB、拓扑、UCM、固件和 initramfs 一致；使用没有现有 USB overlay/ALSA 保存状态的全新可写层临时启动，验证冷启动后 Speakers/Mic 自动出现、网页播放、音量和静音，再允许标记“镜像安装后音频可用”。内部存储安装仍须按 §20.2 I 项单独核对目标和恢复方案。源码及构建检查已按 §19.31 落地，完整安装镜像尚未重建和实机验收。

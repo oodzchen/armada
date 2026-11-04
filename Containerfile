@@ -126,6 +126,7 @@ COPY system_files /system_files/
 
 FROM ${BASE_IMAGE} AS armada-rootfs
 ARG ARMADA_VERSION=unknown
+ARG ARMADA_DEVICE
 LABEL org.opencontainers.image.version="${ARMADA_VERSION}"
 
 RUN --mount=type=bind,from=ctx,source=/,target=/ctx \

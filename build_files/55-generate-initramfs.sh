@@ -20,6 +20,18 @@ duo_firmware=(
     /usr/lib/firmware/qcom/sm7750/retroidpocket/duo/adsp_dtb.mbn
 )
 
+# These board-specific names come from DT/topology and are not discoverable
+# through MODULE_FIRMWARE. Include the verified local inputs before drivers
+# can probe; use the same kernel/module tree installed by step 20.
+early_firmware=( "${duo_firmware[@]}" )
+if [[ "${ARMADA_DEVICE:-}" == oneplus-pad-2-pro ]]; then
+    while read -r digest path; do
+        [[ -z "${digest}" || "${digest}" == \#* ]] && continue
+        early_firmware+=( "/usr/lib/firmware/${path}" )
+    done < /usr/share/armada/firmware/oneplus-pad-2-pro.sha256
+    early_firmware+=( /usr/lib/firmware/qcom/sm8750/OnePlus-Pad-2-Pro-tplg.bin )
+fi
+
 dracut \
     --force \
     --no-hostonly \
@@ -28,7 +40,7 @@ dracut \
     --add ostree \
     --add armada-splash \
     --add armada-ostree-fallback \
-    --install "${duo_firmware[*]}" \
+    --install "${early_firmware[*]}" \
     "${IMG}" "${KVER}"
 
 # dracut drops modules silently: fail the build rather than ship without.
@@ -44,7 +56,7 @@ required=(
     usr/lib/systemd/system/ostree-prepare-root.service.d/armada-fallback.conf \
     usr/lib/ostree/ostree-prepare-root
 )
-required+=( "${duo_firmware[@]#/}" )
+required+=( "${early_firmware[@]#/}" )
 
 if ! lsinitrd "${IMG}" | awk '
     BEGIN {
