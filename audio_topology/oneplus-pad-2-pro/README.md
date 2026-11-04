@@ -57,8 +57,11 @@ cached kernel cannot satisfy the new source hash.
 
 No `/run` enable flag or saved ALSA state is needed. The UCM driver fallback
 matches the DT `CardName`, independent of the bootloader's DMI long name.
-It sets six amplifier gains to 270 (-22.5 dB) and DSP volume to Q13 unity.
-Vendor speaker protection is unavailable; retain these conservative gains.
+It sets six amplifier gains to 350 (-2.5 dB) and DSP volume to Q13 unity
+(8192), matching the levels in erhai-audio commit
+`c69ae8589c94bf8bb9b860b303f6ba16b00242d8`. Vendor speaker protection and
+per-speaker tuning are not included. Unlike the reference project's manual
+enable switch, Armada continues to offer the speakers automatically.
 
 Check the build inputs or an unpacked image with:
 
@@ -81,6 +84,14 @@ shipped blob byte for byte. On the tablet, UCM selects the speakers and
 microphones without a DMI-name alias; browser playback, volume and mute were
 confirmed. An isolated Armada dracut run with matching kernel/modules included
 all 61 required OnePlus firmware/topology files in the resulting archive.
+
+The 350 amplifier setting was subsequently deployed and read back on all six
+amplifiers after reloading WirePlumber; DSP gain remained 8192 and software
+volume/mute were preserved. The user confirmed the updated loudness works;
+a fresh image boot with these levels remains pending. The existing armada18
+read-only image
+still contains the previous levels; its running USB writable layer has the
+updated UCM.
 
 The image test rejects missing/corrupt firmware and incomplete UCM, as well as
 private inputs in a generic build. These source and component checks have

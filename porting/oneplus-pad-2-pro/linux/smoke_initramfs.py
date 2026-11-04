@@ -173,9 +173,28 @@ usbroot() {
 	fi
 	insmod /opd/overlay.ko || { say 'usbroot: overlay module failed'; umount /usb; return; }
 	mount -t squashfs -o ro,loop $img /lower || { say 'usbroot: squashfs mount failed'; umount /usb; return; }
+	# USB_LAYER_STATE_BEGIN
+	bootstrap_defaults=1
+	if [ -d /usb/opd/upper ] && [ -n "$(ls -A /usb/opd/upper)" ]; then
+		bootstrap_defaults=0
+	fi
+	# USB_LAYER_STATE_END
 	mkdir -p /usb/opd/upper /usb/opd/work
 	mount -t overlay -o lowerdir=/lower,upperdir=/usb/opd/upper,workdir=/usb/opd/work overlay /sysroot || { say 'usbroot: overlay mount failed'; return; }
-	cp -af /opd/overlay/. /sysroot/ || { say 'usbroot: test overlay copy failed'; return; }
+	# BOOTSTRAP_DEFAULTS_BEGIN
+	# Existing installations also contain user deletions (overlay whiteouts).
+	# Leave their complete persistent layer intact, including deleted defaults.
+	if [ "$bootstrap_defaults" = 1 ]; then
+		# BusyBox cp -n skips whole existing directories; merge fresh defaults
+		# per path instead, preserving files already provided by the image.
+		(cd /opd/overlay && find . | while IFS= read -r path; do
+			if [ -e "/sysroot/$path" ] || [ -L "/sysroot/$path" ]; then continue; fi
+			cp -a "$path" "/sysroot/$path" || exit 1
+		done) || { say 'usbroot: test overlay copy failed'; return; }
+	else
+		say 'usbroot: existing writable layer preserved; bootstrap defaults skipped'
+	fi
+	# BOOTSTRAP_DEFAULTS_END
 	if grep -qw opd.nofw /proc/cmdline && [ -d /opd/overlay/usr/lib/firmware ]; then
 		(cd /opd/overlay && find usr/lib/firmware -type f) | while read -r f; do rm -f "/sysroot/$f"; done
 		say 'usbroot: opd.nofw, test firmware removed'
