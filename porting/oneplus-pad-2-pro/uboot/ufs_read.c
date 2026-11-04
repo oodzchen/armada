@@ -5,6 +5,7 @@
  * layout follows the pinned U-Boot drivers/ufs/{ufshci.h,ufs.h,ufs-uclass.c}.
  */
 #include <stdio.h>
+#include <string.h>
 #include "opd2413_ufs_read.h"
 #include "opd2413_smmu_snapshot.h"
 #include "opd2413_ufs_link.h"
@@ -133,6 +134,29 @@ static int wait_host(const struct opd_ufs_io *io, unsigned off, uint32_t value)
 	return wait_host_n(io, off, value, 10000);
 }
 
+/*
+ * The DMA window is Normal-NC: every access is its own bus transaction, so
+ * fill and copy it in 64-bit words (all offsets used here are 8-aligned).
+ * Byte loops made a 56 KiB read cost about 8 ms, ~7 MB/s.
+ */
+static void dma_fill(volatile uint8_t *p, uint8_t value, unsigned n)
+{
+	const uint64_t v = 0x0101010101010101ULL * value;
+	unsigned i = 0;
+	for (; i + 8 <= n; i += 8) *(volatile uint64_t *)(p + i) = v;
+	for (; i < n; ++i) p[i] = value;
+}
+
+static void dma_copy(uint8_t *out, const volatile uint8_t *p, unsigned n)
+{
+	unsigned i = 0;
+	for (; i + 8 <= n; i += 8) {
+		uint64_t v = *(const volatile uint64_t *)(p + i);
+		memcpy(out + i, &v, 8); /* the caller's buffer may be unaligned */
+	}
+	for (; i < n; ++i) out[i] = p[i];
+}
+
 /* One command in slot 0. Data, if any, lands at dma + DATA. */
 static int submit(const struct opd_ufs_io *io, volatile uint8_t *dma, uint8_t lun,
 		  const uint8_t *cdb, unsigned cdb_len, uint32_t xfer, struct cmd_result *r)
@@ -144,9 +168,9 @@ static int submit(const struct opd_ufs_io *io, volatile uint8_t *dma, uint8_t lu
 		return CMD_REFUSED;
 	}
 	last_cdb = cdb[0]; last_lun = lun;
-	for (unsigned i = 0; i < DATA; ++i) dma[i] = 0;
-	for (unsigned i = 0; i < xfer; ++i) dma[DATA + i] = 0xa5;
-	for (unsigned i = RSP; i < PRDT; ++i) dma[i] = 0xa5;
+	dma_fill(dma, 0, DATA);
+	dma_fill(dma + DATA, 0xa5, xfer);
+	dma_fill(dma + RSP, 0xa5, PRDT - RSP);
 	utrd[0] = xfer ? 0x15000000 : 0x11000000; /* UFS storage, IRQ, D2H or no data */
 	utrd[2] = 0xf;
 	utrd[4] = (uint32_t)(OPD_DMA_BASE + UCD);
@@ -556,7 +580,7 @@ int opd2413_ufs_read(struct opd_ufs_session *s, uint8_t lun, uint64_t lba, uint3
 		int ret = read10(s->io, s->dma, lun, (uint32_t)lba, n);
 		if (ret < 0) return session_fail(s);
 		if (ret) return 1;
-		for (uint32_t i = 0; i < n * OPD_READ_BLOCK; ++i) out[i] = s->dma[DATA + i];
+		dma_copy(out, s->dma + DATA, n * OPD_READ_BLOCK);
 		out += n * OPD_READ_BLOCK; lba += n; blocks -= n;
 	}
 	return 0;

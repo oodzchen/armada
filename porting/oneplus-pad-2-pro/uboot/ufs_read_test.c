@@ -431,6 +431,8 @@ int main(void)
 	assert(!memcmp(got, s->disk[0].full, 40 * BLK));
 	assert(!opd2413_ufs_read(&session, 0, 977, 15, got));         /* odd start, chunk edge */
 	assert(!memcmp(got, s->disk[0].full + 977 * BLK, 15 * BLK));
+	assert(!opd2413_ufs_read(&session, 0, 3, 17, got + 3));       /* unaligned caller buffer */
+	assert(!memcmp(got + 3, s->disk[0].full + 3 * BLK, 17 * BLK));
 	assert(!opd2413_ufs_read(&session, 0, 1000, 1, got));         /* last block */
 	assert(opd2413_ufs_read(&session, 0, 0xffffffffULL, 2, got) == 1); /* past READ(10) */
 	assert(opd2413_ufs_read(&session, 0x81, 0, 1, got) == 1);     /* well-known LUN */

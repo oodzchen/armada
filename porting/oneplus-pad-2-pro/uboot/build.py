@@ -42,6 +42,10 @@ def main():
     ap.add_argument('--esp-ufs', metavar='PARTLABEL',
                     help='Boot path: load systemd-boot and --esp-dtb from the FAT partition PARTLABEL on UFS LUN --esp-lun '
                          '(read-only) and bootefi it with that DTB; no block or key tests. Falls back to Android.')
+    ap.add_argument('--boot-mode', choices=['countdown', 'quiet', 'menu'], default='countdown',
+                    help='With --esp-ufs: countdown = on-screen log and loader.conf timeout (earlier images); '
+                         'quiet = progress bar only, systemd-boot boots the default entry without a menu; '
+                         'menu = on-screen systemd-boot menu without a countdown (rollback)')
     ap.add_argument('--esp-lun', type=int, default=0)
     ap.add_argument('--esp-dtb', default='/dtbs/qcom/sm8750-oneplus-pad2pro.dtb', help='DTB path inside the --esp-ufs partition')
     ap.add_argument('--ufs-trace', action='store_true', help='Debug with --ufs-blk: stack-frame check around doorbells after board init; a main_loop re-entry halts with no further UFS command')
@@ -59,6 +63,8 @@ def main():
         ap.error('--esp-ufs replaces --efi-esp/--efi-menu (QEMU ramdisk runs need --unattended)')
     if a.esp_ufs and not all(c.isalnum() or c in '_-' for c in a.esp_ufs):
         ap.error('--esp-ufs PARTLABEL must be alphanumeric')
+    if a.boot_mode != 'countdown' and not a.esp_ufs:
+        ap.error('--boot-mode applies only to --esp-ufs')
     a.keys |= a.efi_menu or bool(a.esp_ufs)
     a.efi_hello |= bool(a.esp_ufs)
     a.efi_hello |= a.efi_esp is not None
@@ -100,6 +106,10 @@ def main():
                 run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_UFS_TRACE'], log)
             if a.keys:
                 run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_KEYS'], log)
+            if a.boot_mode == 'quiet':
+                # The U-Boot logo would sit in the corner of the progress bar.
+                run([src/'scripts/config', '--file', out/'build/.config', '--enable', 'OPD2413_PROGRESS',
+                     '--disable', 'VIDEO_LOGO'], log)
             for symbol in ['BLK', 'PARTITIONS', 'EFI_PARTITION', 'CMD_PART', 'FS_FAT', 'CMD_FAT',
                            'FS_EXT4', 'CMD_EXT4', 'CMD_FS_GENERIC', 'CMD_TIME', 'CMD_HASH', 'HUSH_PARSER', 'OPD2413_UFS_BLK']:
                 run([src/'scripts/config', '--file', out/'build/.config', '--enable', symbol], log)
@@ -217,19 +227,35 @@ def main():
                     # Without a usable ESP the observer returns to Android.
                     fdt_load = 'c4000000'
                     esp = f'opdufs {a.esp_lun}:${{opd_esp_part}}'
+                    quiet = a.boot_mode == 'quiet'
+                    progress = lambda percent: [f'opd_progress {percent}'] if quiet else []
                     efi = ['setenv opd_esp_ok 0']
                     step('esp_part', f'part number opdufs {a.esp_lun} {a.esp_ufs} opd_esp_part', False, efi)
                     efi.append(f'if test "${{r}}" = 0; then echo OPD2413_ESP {a.esp_ufs} is partition ${{opd_esp_part}} of LUN {a.esp_lun}')
+                    efi.extend(progress(30))
                     step('esp_dtb', f'load {esp} {fdt_load} {a.esp_dtb}', False, efi)
                     efi.append('if test "${r}" = 0; then echo OPD2413_ESP dtb 0x${filesize} bytes')
+                    efi.extend(progress(35))
                     step('esp_load', f'load {esp} {load} /EFI/BOOT/BOOTAA64.EFI', False, efi)
                     efi.extend(['if test "${r}" = 0; then setenv opd_esp_ok 1; fi', 'fi', 'fi'])
                     efi.extend(['if test "${opd_esp_ok}" = 1; then',
                                 'if test "${opd_keys_on}" = 1; then setenv stdin serial,opdkeys; fi'])
+                    # systemd-boot honours LoaderConfigTimeout over loader.conf
+                    # (armada-efi-update writes "timeout 3" there once).
+                    if quiet:
+                        # No menu and no key wait. systemd-boot, the kernel
+                        # files and the EFI stub then fill the bar to 95 %;
+                        # ExitBootServices completes it.
+                        efi.extend(['opd_loader_timeout menu-disabled', 'opd_progress 40 95'])
+                    elif a.boot_mode == 'menu':
+                        efi.append('opd_loader_timeout -oneshot menu-force')
                     step('esp_boot', f'bootefi {load} {fdt_load}', False, efi)
                     efi.extend(['setenv stdin serial', f'else echo OPD2413_ESP no bootable {a.esp_ufs} partition', 'fi'])
                     tests.extend(['if test "${opd_efi_safe}" = 1; then ' + efi[0], *efi[1:],
                                   'else echo OPD2413_EFI skipped: handoff memory not protected', 'fi'])
+                    if quiet:
+                        # Anything reaching this point failed: show why on screen.
+                        tests.extend(['run v', 'echo OPD2413 Armada did not start, see the log above'])
                 elif a.efi_hello:
                     # Only after the observer reserved and CRC'd the ABL handoff memory.
                     efi = []
@@ -266,6 +292,11 @@ def main():
                 if text.count('version; echo OPD2413_OBSERVER_END;') != 1:raise ValueError('observer.env bootcmd changed')
                 text = text.replace('version; echo OPD2413_OBSERVER_END;', 'version; ' + '; '.join(tests) + '; echo OPD2413_OBSERVER_END;')
                 text += 'q=setenv stdout serial; setenv stderr serial\nv=setenv stdout serial,vidconsole; setenv stderr serial,vidconsole\n'
+                if a.boot_mode == 'quiet':
+                    # Log only to the RAM console; the observer leaves the screen to the bar.
+                    for name in ['stdout', 'stderr']:
+                        if text.count(f'\n{name}=serial,vidconsole\n') != 1: raise ValueError('observer.env console changed')
+                        text = text.replace(f'\n{name}=serial,vidconsole\n', f'\n{name}=serial\n')
             if a.halt_on_failure:
                 if text.count('opd_android; reset') != 1:raise ValueError('observer.env bootcmd changed')
                 text = text.replace('opd_android; reset', 'opd_android; echo OPD2413_HALTED firmware reset withheld for log reading; echo Hold Power and Volume Up to restart')
@@ -289,7 +320,8 @@ def main():
                                 ('OPD2413_EFI_ESP', a.efi_esp is not None and not a.esp_blob),
                                 ('OPD2413_EFI_ESP_BLOB', a.esp_blob),
                                 ('BLKMAP', a.efi_esp is not None),
-                                ('OPD2413_KEYS', a.keys)]:
+                                ('OPD2413_KEYS', a.keys),
+                                ('OPD2413_PROGRESS', a.boot_mode == 'quiet')]:
             if (f'CONFIG_{symbol}=y' in config) != enabled:
                 raise ValueError('Snapshot configuration mismatch: ' + symbol)
         # This observer cannot initialize or write storage or persistent env.

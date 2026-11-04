@@ -49,9 +49,16 @@ static void ramdisk_read(lbaint_t lba, lbaint_t blkcnt, uint8_t *out)
 }
 #endif
 
+#ifdef CONFIG_OPD2413_PROGRESS
+void opd2413_progress_read(u64 bytes); /* observer.c */
+#endif
+
 static unsigned long opd_blk_read(struct udevice *dev, lbaint_t start, lbaint_t blkcnt, void *buffer)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(dev);
+#ifdef CONFIG_OPD2413_PROGRESS
+	opd2413_progress_read((u64)blkcnt * OPD_READ_BLOCK);
+#endif
 #ifdef CONFIG_OPD2413_UFS_TRACE
 	printf("opdufs: read lun %d lba %llu count %llu buffer %p\n", desc->devnum,
 	       (unsigned long long)start, (unsigned long long)blkcnt, buffer);

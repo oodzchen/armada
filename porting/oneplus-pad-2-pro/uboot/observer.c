@@ -28,8 +28,14 @@
 #endif
 #ifdef CONFIG_OPD2413_EFI
 #include <efi_loader.h>
+#include <efi_variable.h>
 #include <env.h>
 #include <lmb.h>
+#endif
+#ifdef CONFIG_OPD2413_PROGRESS
+#include <asm/cache.h>
+#include <cpu_func.h>
+#include <video.h>
 #endif
 #ifdef CONFIG_OPD2413_KEYS
 #include <env.h>
@@ -195,6 +201,61 @@ static void probe_sync(void *ctx) { mb(); }
 static void probe_delay(unsigned us, void *ctx) { udelay(us); }
 #endif
 
+#ifdef CONFIG_OPD2413_PROGRESS
+/*
+ * Quiet boot: nothing is printed on screen (the log still reaches the RAM
+ * console); instead kShimC's progress bar continues along the top rows,
+ * same geometry and colours (kShimC CONFIG_KSHIM_DEBUG_MARK_*: 16 rows,
+ * white on dark grey, 20 % at its handoff).
+ */
+#define BAR_ROWS 16
+#define BAR_TRACK 0xff303030U
+#define BAR_DONE 0xffffffffU
+/* Reads of unknown total size approach the target: half way at 32 MiB. */
+#define BAR_HALF_BYTES (32ULL << 20)
+static struct udevice *bar_dev;
+static unsigned bar_permille, bar_auto_from, bar_auto_to;
+static u64 bar_bytes;
+
+static void opd2413_progress(unsigned permille)
+{
+	if (!bar_dev || permille > 1000 || permille < bar_permille) return;
+	struct video_priv *priv = dev_get_uclass_priv(bar_dev);
+	if (priv->bpix != VIDEO_BPP32 || priv->ysize < BAR_ROWS) return;
+	ulong done = (ulong)priv->xsize * permille / 1000;
+	for (unsigned y = 0; y < BAR_ROWS; ++y) {
+		u32 *line = priv->fb + y * priv->line_length;
+		for (ulong x = 0; x < priv->xsize; ++x) line[x] = x < done ? BAR_DONE : BAR_TRACK;
+	}
+	/* The framebuffer is mapped Normal-NC here; flush in case it is not. */
+	ulong start = (ulong)priv->fb, end = start + BAR_ROWS * priv->line_length;
+	flush_dcache_range(ALIGN_DOWN(start, ARCH_DMA_MINALIGN), ALIGN(end, ARCH_DMA_MINALIGN));
+	bar_permille = permille;
+}
+
+/* Every opdufs block read while armed advances the bar towards bar_auto_to. */
+void opd2413_progress_read(u64 bytes)
+{
+	if (!bar_auto_to) return;
+	bar_bytes += bytes;
+	unsigned p = bar_auto_from + (u64)(bar_auto_to - bar_auto_from) * bar_bytes / (bar_bytes + BAR_HALF_BYTES);
+	if (p >= bar_permille + 5) opd2413_progress(p);
+}
+
+/* opd_progress <percent> [<auto-target percent>] */
+static int do_opd_progress(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	if (argc < 2) return CMD_RET_USAGE;
+	unsigned now = dectoul(argv[1], NULL) * 10, to = argc > 2 ? dectoul(argv[2], NULL) * 10 : 0;
+	if (now > 1000 || to > 1000 || (to && to <= now)) return CMD_RET_USAGE;
+	opd2413_progress(now);
+	bar_auto_from = now; bar_auto_to = to; bar_bytes = 0;
+	return CMD_RET_SUCCESS;
+}
+U_BOOT_CMD(opd_progress, 3, 0, do_opd_progress, "advance the quiet-boot progress bar",
+	   "<percent> [<percent reached by later block reads>]");
+#endif
+
 static u64 read_cntpct(void)
 {
 	u64 v;
@@ -285,6 +346,34 @@ static int chosen_u64(const void *fdt, int node, const char *name, u64 *out)
 	*out = len == 8 ? cell64(p) : fdt32_to_cpu(p[0]);
 	return 0;
 }
+
+/*
+ * opd_loader_timeout [-oneshot] <value>: systemd-boot's LoaderConfigTimeout
+ * (or LoaderConfigTimeoutOneShot) as a volatile variable for this boot only.
+ * It overrides loader.conf: menu-disabled boots the default entry without a
+ * menu, -oneshot menu-force shows the menu without a countdown.
+ */
+static int do_opd_loader_timeout(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	static const efi_guid_t loader = EFI_GUID(0x4a67b082, 0x0a4c, 0x41cf,
+						   0xb6, 0xc7, 0x44, 0x0b, 0x29, 0xbb, 0x8c, 0x4f);
+	int oneshot = argc == 3 && !strcmp(argv[1], "-oneshot");
+	if (argc != 2 && !oneshot) return CMD_RET_USAGE;
+	const char *value = argv[argc - 1];
+	u16 data[16];
+	size_t n = strlen(value);
+	if (!n || n >= ARRAY_SIZE(data)) return CMD_RET_USAGE;
+	for (size_t i = 0; i <= n; ++i) data[i] = (unsigned char)value[i]; /* ASCII to UCS-2, with the NUL */
+	efi_status_t r = efi_init_obj_list();
+	if (r == EFI_SUCCESS)
+		r = efi_set_variable_int(oneshot ? u"LoaderConfigTimeoutOneShot" : u"LoaderConfigTimeout", &loader,
+					 EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
+					 (n + 1) * sizeof(u16), data, false);
+	printf("OPD2413_LOADER_TIMEOUT%s %s status=%lx\n", oneshot ? " oneshot" : "", value, (ulong)r);
+	return r == EFI_SUCCESS ? CMD_RET_SUCCESS : CMD_RET_FAILURE;
+}
+U_BOOT_CMD(opd_loader_timeout, 3, 0, do_opd_loader_timeout, "set systemd-boot's menu timeout for this boot",
+	   "[-oneshot] <seconds|menu-disabled|menu-hidden|menu-force>");
 
 /* EFI ResetSystem: return to Android through the checked path; on refusal
  * the caller continues with the ordinary reset. */
@@ -561,6 +650,10 @@ U_BOOT_CMD(opd_keys, 2, 0, do_opd_keys, "read-only volume/power key test", "[sec
  * (power mode, queue, Hibern8), as when ABL itself starts a kernel. */
 void board_quiesce_devices(void)
 {
+#ifdef CONFIG_OPD2413_PROGRESS
+	bar_auto_to = 0;
+	opd2413_progress(1000);
+#endif
 	printf("OPD2413_EXIT_BOOT_SERVICES restoring UFS: %s\n",
 	       opd2413_ufs_blk_stop() ? "FAILED (the next OS must reset UFS)" : "restored");
 }
@@ -571,10 +664,18 @@ int opd2413_observer_late(void)
 	struct udevice *display;
 	int ret = uclass_first_device_err(UCLASS_VIDEO, &display);
 	printf("observer: video probe=%d\n", ret);
+#ifdef CONFIG_OPD2413_PROGRESS
+	/* Quiet: the environment keeps the log off the screen ("run v" shows it). */
+	if (!ret) {
+		bar_dev = display;
+		opd2413_progress(200);
+	}
+#else
 	if (!ret) {
 		iomux_doenv(stdout, "serial,vidconsole");
 		iomux_doenv(stderr, "serial,vidconsole");
 	}
+#endif
 	/* The counter runs from power-on: a re-entered observer prints a larger value. */
 	printf("OPD2413_OBSERVER_READY EL%u original_fdt=%llx cntpct=%llx\n", current_el(),
 	       (unsigned long long)get_prev_bl_fdt_addr(), read_cntpct());
@@ -605,6 +706,9 @@ int opd2413_observer_late(void)
 		static const struct opd_ufs_io io = {snapshot_read32, probe_write32, probe_sync, probe_delay, NULL};
 		android_handoff_safe = opd2413_ufs_blk_start(&io) >= 0;
 	} else printf("UFS_READ skipped: unexpected EL or stream ID (block devices)\n");
+#ifdef CONFIG_OPD2413_PROGRESS
+	opd2413_progress(250);
+#endif
 #elif defined(CONFIG_OPD2413_UFS_READ)
 	if (current_el() == 1 && original_ufs_sid == 0x60) {
 		const struct opd_ufs_io io = {snapshot_read32, probe_write32, probe_sync, probe_delay, NULL};

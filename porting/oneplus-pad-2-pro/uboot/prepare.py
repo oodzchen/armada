@@ -106,6 +106,9 @@ def main():
                   'config OPD2413_EFI\n\tbool "Reserve the ABL handoff memory and allow bootefi"\n'
                   '\tdepends on OPD2413_UFS_BLK && EFI_LOADER\n\tdefault n\n\n')
     insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
+                  'config OPD2413_PROGRESS\n\tbool "Quiet boot: continue the kShimC progress bar instead of the on-screen log"\n'
+                  '\tdepends on OPD2413_UFS_BLK && VIDEO\n\tdefault n\n\n')
+    insert_before(mach/'Kconfig', 'config OPD2413_OBSERVER\n',
                   'config OPD2413_UFS_TRACE\n\tbool "Debug: stack-frame check around UFS doorbells issued after board init"\n'
                   '\tdepends on OPD2413_UFS_READ\n\tdefault n\n\n')
     # EFI ResetSystem (e.g. systemd-boot "Reboot The System") first tries the
