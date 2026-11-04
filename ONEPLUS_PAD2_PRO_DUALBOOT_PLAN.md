@@ -14,7 +14,7 @@
 | 四：Armada 设备移植与 USB 试启动 | 完整系统已进入桌面/游戏模式；显示、触控、磁吸键盘、触控板、Wi-Fi 和桌面音频已实测。配套内核/1594 模块及 USB 持久层工作；1408 音频源码、拓扑和 UCM 已纳入构建，服务失败项已清零 | 完整新镜像/全新可写层冷启动；逐颗扬声器、麦克风增益和开机 APM 超时；挂起恢复与长期稳定性 |
 | 五：安装与固化双启动 | 部分：kShimC 菜单已固化到 `boot_b`，但 Linux 启动文件仍内嵌在 boot、根文件系统仍在 U 盘 | 内部 ESP/根/数据布局、最终 boot（不再内嵌 ESP）、升级/恢复方案及多轮双系统启动回归 |
 
-**下一项工作**：Armada 已从内部 UFS 启动（§19.41）；Android 需在 recovery 清除数据并恢复备份，随后做两系统冷启动、更新/回滚与外设回归。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
+**下一项工作**：Armada 已从内部 UFS 启动（§19.41），Android 已清除数据并恢复（§19.42）；接下来做两系统冷启动、Armada 更新/回滚与外设回归。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
 
 **剩余工作量**主要在：从源码完整重建新镜像并完成全新可写层/冷启动回归、其余外设和休眠稳定性、内部存储与 ESP 布局、双启动固化及升级/恢复方案。桌面/游戏模式、USB 根文件系统和 Wi-Fi 已有实测记录，不再列为尚未启动。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
 
@@ -1317,6 +1317,13 @@ CRC verified; 0 bytes recovered relative to first replica
 - **写入**（用户逐项批准）：安装会话中 LUN0 15 个分区只读、LUN1–5 整盘只读；GPT 写入回读一致（`new`），userdata 204 GiB，ARMADA/ARMADA_BOOT/ARMADA_ROOT 512 MiB/1 GiB/254.5 GiB；部署提交 `b0402782…`，ESP 同步 65 文件；内部系统补入禁止挂起、sshd（仅密钥）与 Wi-Fi 配置。
 - **首次内部启动**（拔 U 盘，kShimC 选 Armada）：U-Boot→systemd-boot（3 秒）→内核→dracut→ostree composefs 根，`running`、失败单元 0；root=UUID `ARMADA_ROOT`，/var、/var/home 为 btrfs 子卷（/var/home 余 232 GB），/boot ext4、/boot/efi ESP；DT 为内核包 DTB（UFS okay、ramoops 0xbfff00000）；ufs-guard 执行 153 次，userdata/super 只读；声卡、DSI、ADSP/CDSP 正常；Steam 首次更新中。rpm-ostree 来源为本地 OCI 包。
 - **未完成**：Android 需在 recovery 中清除数据后重新设置并恢复备份；Armada 内部系统的音频/触控/休眠等完整回归、两系统冷启动 10 轮、一次 Armada 更新与回滚；SELinux 仍为 0。
+
+### 19.42 Android 清除数据与恢复（2026-11-04）
+
+- 用户在 recovery 清除数据后 Android 正常开机（b 槽，`boot_b` 仍为 ins1 `4e307868…`，内核 WildKernel），userdata 204 GiB。init_boot 中的 KernelSU LKM 不受影响；从备份装回 KernelSU Next 管理器，Shell 授权后 `/data/adb` 整体还原（保留新 `.allowlist` 与 `ksud`，旧授权列表另存），重启后 6 个模块启用、susfs 生效。
+- 应用（`userdata-backup/restore_apps.py`）：备份中 `/data/app` 下的 APK 用 `install-multiple -r -d` 装回，CE/DE 数据还原（不还原旧 `lib` 链接），chown 到新 uid、cache/code_cache 用 cache gid；本机 `restorecon -RF` 不计算应用 MLS 分类，改用包管理器给新目录的标签对整棵树 `chcon`。外部数据 `Android/data/<pkg>` 用 uid:1078。56 个成功、0 失败（KernelSU 管理器与「备份与恢复」按计划跳过）。内部存储个人文件以 `adb push` 写入 /sdcard。
+- 大文件：首次一次性 `adb push` Droidspaces 包（约 140 MB/s）在 51.8 GB 时平板卡死黑屏，强制重启后无 pstore 线索，部分文件前缀哈希与源一致。改为 2 GiB 分块追加、块间暂停并按 CPU/主板/外壳与电池温度（PMIC 传感器空闲即超 50°C，不计）限流，未再出问题；解包实际 1–2 分钟完成。Droidspaces 6 个文件（含 128 GB 稀疏 rootfs.img，`67f59205…`）与 DroidDeck 129614 个文件逐一哈希一致。`find -exec +` 对十余万文件 chcon 会超过参数上限，改用 `xargs -0 -n 200`。/data 已用 143 GB、余 61 GB。
+- 无法恢复：指纹、锁屏、Keystore 密钥及各账号登录状态需用户重设；需要 root 的应用须在 KernelSU 中重新授权。
 
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 
