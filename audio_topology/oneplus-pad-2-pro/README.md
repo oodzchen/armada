@@ -29,19 +29,22 @@ both `source.json` and the image's `oneplus-pad-2-pro-topology.sha256`.
 
 ## Local installation image inputs
 
-Stock ADSP/SoCCP firmware and the AW88261 ACF are private local inputs, not part
+Stock ADSP/SoCCP, touch and signed GPU firmware and the AW88261 ACF are private local inputs, not part
 of this repository. Extract the firmware from the matching stock images, then:
 
 ```sh
 python3 porting/oneplus-pad-2-pro/linux/prepare_audio_firmware.py \
   --firmware-dir /path/to/extracted/firmware \
-  --aw88261-acf /path/to/stock/odm/firmware/aw882xx_acf.bin
+  --aw88261-acf /path/to/stock/odm/firmware/aw882xx_acf.bin \
+  --touch-firmware /path/to/stock/nt36536-xn242.bin \
+  --gpu-zap /path/to/stock/gen80000_zap.mbn
 just package kernel
 ARMADA_DEVICE=oneplus-pad-2-pro just build localhost/armada-oneplus-pad-2-pro latest
 ```
 
 The preparation tool validates every input before copying into git-ignored
-`system_files/usr/lib/firmware/{qcom/sm8750,awinic}/erhai/` directories. Build
+`system_files/usr/lib/firmware/{qcom/sm8750,awinic}/erhai/` and
+`system_files/usr/lib/firmware/novatek/nt36536-xn242.bin`. Build
 from this local directory so these inputs are in the container build context.
 The normal system-files installation copies them into the image; they are
 intentionally present in the resulting local image. Their distribution remains
@@ -54,6 +57,10 @@ The dracut step uses the image's newly installed kernel/modules and explicitly
 includes all verified board firmware and topology, then checks the actual
 archive listing. The kernel package hash includes the new patch, so an old
 cached kernel cannot satisfy the new source hash.
+
+Touch firmware and the board-signed GPU ZAP must be present in both the image
+and initramfs. Supplying them only through the USB test overlay leaves an
+internal installation without touch input and GPU acceleration after updates.
 
 No `/run` enable flag or saved ALSA state is needed. The UCM driver fallback
 matches the DT `CardName`, independent of the bootloader's DMI long name.

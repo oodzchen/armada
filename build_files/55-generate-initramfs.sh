@@ -30,6 +30,21 @@ if [[ "${ARMADA_DEVICE:-}" == oneplus-pad-2-pro ]]; then
         early_firmware+=( "/usr/lib/firmware/${path}" )
     done < /usr/share/armada/firmware/oneplus-pad-2-pro.sha256
     early_firmware+=( /usr/lib/firmware/qcom/sm8750/OnePlus-Pad-2-Pro-tplg.bin )
+    # The generic A830 microcode is supplied by system_files/linux-firmware;
+    # early GPU probing also needs it alongside the board-signed ZAP.
+    for name in gen80000_sqe.fw gen80000_gmu.bin gen80000_aqe.fw; do
+        path="/usr/lib/firmware/qcom/${name}"
+        if [[ -f "${path}" ]]; then
+            early_firmware+=( "${path}" )
+        elif [[ -f "${path}.xz" ]]; then
+            early_firmware+=( "${path}.xz" )
+        elif [[ -f "${path}.zst" ]]; then
+            early_firmware+=( "${path}.zst" )
+        else
+            echo "Missing OnePlus GPU firmware: ${name}" >&2
+            exit 1
+        fi
+    done
 fi
 
 dracut \

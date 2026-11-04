@@ -7,7 +7,8 @@ manifest="${root}/usr/share/armada/firmware/oneplus-pad-2-pro.sha256"
 firmware="${root}/usr/lib/firmware"
 if [[ "${ARMADA_DEVICE:-}" != oneplus-pad-2-pro ]]; then
     if [[ -d "${firmware}/qcom/sm8750/erhai" ||
-          -d "${firmware}/awinic/erhai" ]]; then
+          -d "${firmware}/awinic/erhai" ||
+          -e "${firmware}/novatek/nt36536-xn242.bin" ]]; then
         echo 'Private OnePlus firmware requires ARMADA_DEVICE=oneplus-pad-2-pro' >&2
         exit 1
     fi
@@ -26,4 +27,4 @@ if grep -q 'speaker-enabled' "${ucm}/Qualcomm/sm8750/OnePlus-Pad-2-Pro/HiFi.conf
     echo 'OnePlus speaker UCM still depends on a runtime enable flag' >&2
     exit 1
 fi
-echo 'OnePlus audio firmware, topology and UCM verified'
+echo 'OnePlus audio, touch and GPU firmware, topology and UCM verified'

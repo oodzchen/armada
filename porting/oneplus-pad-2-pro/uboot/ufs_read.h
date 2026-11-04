@@ -78,7 +78,17 @@ struct opd_ufs_session {
 	struct opd_ufs_read_result *res;
 	uint32_t saved[3];
 	uint8_t condition, open, broken;
+#ifdef OPD2413_BOOT_CHOICE_WRITER
+	/* Set only by the boot-choice adapter after GPT/image/Blob validation. */
+	uint8_t choice_ready, choice_lun;
+	uint32_t choice_lba[2];
+#endif
 };
+#ifdef OPD2413_BOOT_CHOICE_WRITER
+/* One FUA block, restricted to the two authorized journal pages. */
+int opd2413_ufs_write_choice(struct opd_ufs_session *s, uint8_t lun,
+                            uint32_t lba, const void *page);
+#endif
 int opd2413_ufs_open(struct opd_ufs_session *s, const struct opd_ufs_io *io, volatile void *dma,
 		     unsigned flags, struct opd_ufs_read_result *res);
 int opd2413_ufs_luns(struct opd_ufs_session *s, uint8_t luns[OPD_READ_MAX_LUNS], unsigned *count);

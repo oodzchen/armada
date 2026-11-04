@@ -17,6 +17,10 @@ reject oneplus-pad-2-pro 'missing firmware'
 mkdir -p "${work}/usr/lib/firmware/awinic/erhai"
 reject '' 'private ACF directory in a generic image'
 rmdir "${work}/usr/lib/firmware/awinic/erhai"
+mkdir -p "${work}/usr/lib/firmware/novatek"
+touch "${work}/usr/lib/firmware/novatek/nt36536-xn242.bin"
+reject '' 'private touch firmware in a generic image'
+rm "${work}/usr/lib/firmware/novatek/nt36536-xn242.bin"
 mkdir -p "${work}/usr/lib/firmware/qcom/sm8750/erhai"
 reject '' 'private ADSP directory in a generic image'
 (
@@ -37,6 +41,14 @@ if [[ -d "${repo}/system_files/usr/lib/firmware/qcom/sm8750/erhai" ]]; then
     cp "${repo}/system_files/usr/lib/firmware/qcom/sm8750/OnePlus-Pad-2-Pro-tplg.bin" \
        "${work}/usr/lib/firmware/qcom/sm8750/"
     ROOT="${work}" ARMADA_DEVICE=oneplus-pad-2-pro bash "${check}" >"${work}/pass.log"
+    for path in novatek/nt36536-xn242.bin qcom/sm8750/erhai/gen80000_zap.mbn; do
+        file="${work}/usr/lib/firmware/${path}"
+        mv "${file}" "${file}.saved"
+        reject oneplus-pad-2-pro "missing ${path}"
+        printf corrupt >"${file}"
+        reject oneplus-pad-2-pro "corrupt ${path}"
+        mv "${file}.saved" "${file}"
+    done
     acf="${work}/usr/lib/firmware/awinic/erhai/aw88261_acf.bin"
     mv "${acf}" "${acf}.saved"
     reject oneplus-pad-2-pro 'missing ACF'

@@ -112,17 +112,26 @@ static void execute(struct mock *s)
 	if (cmd[0] == 0x16) { execute_query(s); return; }
 	uint32_t xfer = rd_be32(cmd + 12);
 	uint8_t op = cmd[16], lun = cmd[2];
+	unsigned writing = 0;
+#ifdef OPD2413_BOOT_CHOICE_WRITER
+	writing = op == 0x2a;
+	if (writing) {
+		assert(lun == 0 && xfer == BLK && cmd[17] == 8);
+		assert(rd_be32(cmd + 18) == 100 || rd_be32(cmd + 18) == 101);
+		assert(!cmd[22] && !cmd[23] && cmd[24] == 1 && !cmd[25]);
+	}
+#endif
 	/* Independent wire-format and read-only checks. */
-	assert(utrd[0] == (xfer ? 0x15000000U : 0x11000000U) && utrd[2] == 0xf);
+	assert(utrd[0] == (writing ? 0x13000000U : xfer ? 0x15000000U : 0x11000000U) && utrd[2] == 0xf);
 	assert(utrd[4] == OPD_DMA_BASE + 0x1000 && !utrd[5] && utrd[6] == 0x00800080);
 	assert(utrd[7] == (xfer ? 0x01000001U : 0x01000000U));
-	assert(cmd[0] == 0x01 && cmd[1] == (xfer ? 0x40 : 0) && !cmd[3] && !cmd[4]);
-	assert(op == 0x00 || op == 0xa0 || op == 0x25 || op == 0x9e || op == 0x28 || (op == 0x1b && s->ssu_allowed));
+	assert(cmd[0] == 0x01 && cmd[1] == (writing ? 0x20 : xfer ? 0x40 : 0) && !cmd[3] && !cmd[4]);
+	assert(op == 0x00 || op == 0xa0 || op == 0x25 || op == 0x9e || op == 0x28 || (op == 0x1b && s->ssu_allowed) || writing);
 	if (xfer) {
 		uint32_t *prd = (uint32_t *)(s->dma + 0x1400);
 		assert(prd[0] == OPD_DMA_BASE + DATA && !prd[1] && !prd[2] && prd[3] == ((xfer - 1) | 3));
 		assert(DATA + xfer <= OPD_DMA_SIZE);
-		for (unsigned i = 0; i < xfer; ++i) assert(data[i] == 0xa5);
+		if (!writing) for (unsigned i = 0; i < xfer; ++i) assert(data[i] == 0xa5);
 	}
 	for (unsigned i = 0; i < 512; ++i) assert(rsp[i] == 0xa5);
 	++s->opcodes[op]; ++s->commands;
@@ -182,7 +191,8 @@ static void execute(struct mock *s)
 			else if (lba + b >= d->last - 4 && lba + b <= d->last) src = d->backup + (lba + b - (d->last - 4)) * BLK;
 			if (!src && d->full) { assert(lba + b <= d->last); src = d->full + (lba + b) * BLK; }
 			assert(src); /* sparse disks: only GPT blocks are ever requested */
-			memcpy(data + b * BLK, src, BLK);
+			if (writing) memcpy(src, data + b * BLK, BLK);
+			else memcpy(data + b * BLK, src, BLK);
 		}
 		if (s->mode == 4 && s->commands == s->fail_at) residual = xfer + 1;
 	}
@@ -456,6 +466,38 @@ int main(void)
 	assert(opd2413_ufs_read(&session, 0, 0, 20, got) == -1 && session.broken);
 	assert(opd2413_ufs_read(&session, 0, 0, 1, got) == 1);
 	assert(opd2413_ufs_close(&session) == -1 && !s->host[0x60/4]);
+#ifdef OPD2413_BOOT_CHOICE_WRITER
+	/* The dedicated writer cannot escape its two data pages. */
+	init(s, dma);
+	assert(!opd2413_ufs_open(&session, &io, dma, OPD_UFS_WAKE, &r));
+	unsigned before = s->commands;
+	memset(got, 0x6b, BLK);
+	assert(opd2413_ufs_write_choice(&session, 0, 100, got) == 1);
+	assert(s->commands == before);
+	session.choice_ready = 1; session.choice_lun = 0;
+	session.choice_lba[0] = 100; session.choice_lba[1] = 101;
+	assert(opd2413_ufs_write_choice(&session, 0, 99, got) == 1);
+	assert(opd2413_ufs_write_choice(&session, 0, 102, got) == 1);
+	assert(opd2413_ufs_write_choice(&session, 1, 100, got) == 1);
+	assert(opd2413_ufs_write_choice(&session, 0, 100, NULL) == 1);
+	assert(s->commands == before);
+	assert(!opd2413_ufs_write_choice(&session, 0, 100, got));
+	assert(!memcmp(s->disk[0].full + 100 * BLK, got, BLK));
+	assert(!opd2413_ufs_read(&session, 0, 100, 1, got + BLK));
+	assert(!memcmp(got, got + BLK, BLK));
+	assert(!opd2413_ufs_close(&session) && !session.choice_ready);
+	restored(s);
+	assert(opd2413_ufs_write_choice(&session, 0, 101, got) == 1);
+	/* Transport faults prohibit all later use and Android handoff. */
+	init(s, dma);
+	assert(!opd2413_ufs_open(&session, &io, dma, OPD_UFS_WAKE, &r));
+	session.choice_ready = 1; session.choice_lun = 0;
+	session.choice_lba[0] = 100; session.choice_lba[1] = 101;
+	s->mode = 2; s->fail_at = s->commands + 1;
+	assert(opd2413_ufs_write_choice(&session, 0, 101, got) == -1 && session.broken);
+	assert(opd2413_ufs_close(&session) == -1);
+	puts("PASS: boot-choice writer exact LUN/LBAs, FUA wire format, payload, readback, closed/unauthorized/fault refusal");
+#endif
 	free(got);
 	for (unsigned i = 0; i < 3; ++i) { free(s->disk[i].primary); free(s->disk[i].backup); free(s->disk[i].full); }
 	free(buffer); free(s);

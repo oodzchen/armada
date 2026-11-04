@@ -1,24 +1,26 @@
 # 一加平板 2 Pro（SM8750）Android / Armada 双启动方案
 
-> 状态（2026-11-04）：完整 Armada 已通过临时启动从 USB 进入桌面和游戏模式。显示黑屏修复 1406/1407 已提交（`98f8101`），临时启动 16/16 通过；桌面网页音频、音量和静音已由用户确认正常，六路350增益也已试听通过（§19.38）。音频内核 1408、拓扑、UCM、固件输入检查及 initramfs 收录已接入源码构建（§19.31）；平板无内置手柄导致的服务误报已修复，系统恢复 `running`、失败单元为 0（§19.32）。armada19 独立镜像（`1768f477…`，自身包含权限与350增益）已通过全新可写层首启/再启及原配置启动验收（§19.39）。kShimC 已写入 `boot_b`（`9d91e3a9…`，保留 AVB vbmeta），开机先出菜单、默认 ColorOS，Armada 仍从 U 盘运行，不再需要电脑 fastboot。
+> 状态（2026-11-04 收尾）：Android / Armada 已从内部 UFS 双启动，bootc 机内更新已通过（§19.41–19.43）。kShimC 菜单记忆已固化到 `boot_b`（`492f2cdf…`，保留原 AVB 元数据）：记住最后确认的具体入口，用户已确认普通重启不按键自动进入 Armada。fast3 触屏失效、动画卡顿的固件缺失已修复，触屏实测正常，KWin 使用 Adreno 830。**进度条结束后的灰闪仍未解决**；grey1 候选未改善，按用户要求停止本轮排查。最新实现、证据和恢复路径见 §19.44。
 > 本文中标注 **【待验证】** 的内容尚未在实机上确认，不能当作事实使用。
-> **继续工作时先读第 21 节（最新验收、测试清单与机内双启动缺口），实现证据见 19.30–19.38，显示问题再读 19.23–19.28。** 第 17、18、20 节及更早测试清单包含历史状态；其中旧“下一步”、补丁计数和未实现状态不代表当前进度。不要从已完成的 UFS NOP、EFI、erhai 点屏或 Armada 触控测试重新开始。
+> **继续工作先读 §19.44 与本页状态表，再按需读第 21 节剩余验收清单；显示黑屏根因见 §19.23–19.28。** 第 17、18、20、21 节及更早测试清单含历史状态；其中旧“下一步”和未实现状态不代表当前进度。不要从已完成的 UFS NOP、EFI、内部安装或触控移植重新开始。
 
 ## 当前进度与剩余工作
 
 | 阶段 | 当前状态 | 仍需完成 |
 |---|---|---|
 | 一：采集与备份 | 检查点已通过 | 后续每轮继续核对原镜像与当前槽位 |
-| 二：kShimC 与 Android | 检查点已通过；kShimC 已写入 `boot_b`，从闪存启动的菜单/ColorOS 正常（§19.39） | 长期回归；每次换 Armada 启动文件需重写 `boot_b` |
-| 三：U-Boot 可行性 | 基本通过：显示、内存、返回 Android、UFS 唤醒/只读/恢复、6 个 LUN 主备 GPT（66/66）、只读块设备上的 FAT16/ext4（4/4 CRC 一致）、EFI loader（ABL 交接内存保留并 CRC 校验）、systemd-boot 菜单（音量/电源键只读输入，Reboot 经 EFI 复位钩子返回 Android）、ESP 作为 kShimC Blob、ExitBootServices 时恢复 UFS | ESP/根文件系统的最终位置；UFS 上的 ESP 需要写入许可 |
+| 二：kShimC 与 Android | 真机通过；菜单记忆已固化，ColorOS 交接、Armada 保存 / 下次预选 / 普通重启自动进入均已通过（§19.44） | 长期回归、Android OTA 后恢复；boot menu / USB 记忆路径单独实机回归 |
+| 三：U-Boot 可行性 | 真机通过：显示、内存、返回 Android、UFS 读取与恢复、内部 ESP / EFI / systemd-boot 和 ExitBootServices；启动 loader 约 1.7 s（§19.43） | 回滚项实际启动；仍保留既有 U-Boot 只读媒体白名单 |
 | 四：Armada 设备移植与 USB 试启动 | 完整系统已进入桌面/游戏模式；显示、触控、磁吸键盘、触控板、Wi-Fi 和桌面音频已实测。配套内核/1594 模块及 USB 持久层工作；1408 音频源码、拓扑和 UCM 已纳入构建，服务失败项已清零 | 完整新镜像/全新可写层冷启动；逐颗扬声器、麦克风增益和开机 APM 超时；挂起恢复与长期稳定性 |
-| 五：安装与固化双启动 | 部分：kShimC 菜单已固化到 `boot_b`，但 Linux 启动文件仍内嵌在 boot、根文件系统仍在 U 盘 | 内部 ESP/根/数据布局、最终 boot（不再内嵌 ESP）、升级/恢复方案及多轮双系统启动回归 |
+| 五：安装与固化双启动 | 内部 UFS 部署、bootc 更新、kShimC 固化与菜单记忆已通过（§19.41–19.44）；Armada 启动文件从内部 ESP 更新，boot 中仍保留 USB 恢复负载 | 实际启动回滚项、OTA / 恢复维护和长期双系统冷启动回归；继续保留 USB 恢复入口 |
 
-**下一项工作**：Armada 已从内部 UFS 启动（§19.41），Android 已清除数据并恢复（§19.42）；启动提速、进度条和首次机内更新（fast3）已完成（§19.43）。接下来：查清剩余灰屏一闪、kShimC 记住上次选择、实际启动一次回滚项，再做两系统冷启动与外设回归。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
+**下一项工作（下次继续时）**：采集灰闪相对进度条、EFI / 早期帧缓冲、面板接管的精确时序，再确定单变量实验；不要继续按“关灯成功即消除灰闪”的假设叠补丁。菜单记忆、触屏和 GPU 回归已完成，本轮按用户要求收尾。回滚项实际启动与其余外设 / 休眠验收仍待完成。
 
-**剩余工作量**主要在：从源码完整重建新镜像并完成全新可写层/冷启动回归、其余外设和休眠稳定性、内部存储与 ESP 布局、双启动固化及升级/恢复方案。桌面/游戏模式、USB 根文件系统和 Wi-Fi 已有实测记录，不再列为尚未启动。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
+**剩余工作量**主要在灰闪时序、真实回滚与 OTA 恢复维护、其余外设和休眠稳定性，以及发布时从源码完整重建 / 全新部署验收。内部存储布局、双启动固化、菜单记忆、触屏和 GPU 已有实测结果。erhai 驱动可继续借鉴，但不运行其重新分区 / 刷写安装脚本。目前没有可靠的完成百分比估计。
 
-**Android 基线状态**（2026-11-04 起 `boot_b` 为 kShimC 镜像 `9d91e3a9666c9886a761a88401b1b760bd7bdeaeed4a19f54615796dfc30a055`，其中 ColorOS 内核与原 WildKernel 逐字节相同；原镜像 `0e5afd65…` 备份于 `~/oneplus-pad2pro-backup/slot_b/boot_b.img`，恢复用 `fastboot flash boot_b` 该文件，见 §19.39。以下为 2026-11-03 的历史记录）：ColorOS 正常启动，b 槽，`boot_b` SHA-256 当时为 `0e5afd65d6c92bb12c3a319ddcbcfc9ffaac6a68e22c567c4a6ef1cf82705e49`；用户确认解锁、指纹、Wi-Fi、KernelSU/susfs 全部正常。所有实验均为 `fastboot boot` 临时启动，未刷写分区、未改 GPT、未格式化、未刷 OEM ABL；Linux 冒烟 DT 禁用 UFS/PHY，块设备仅 loop0–7。普通重启仍进入原有 Android，尚未固化 kShim 菜单。按本轮用户“更新文档，然后提交”的要求，本方案进度与源码一并提交；原始记录和私有固件仍保留本地。
+**当前 Android / boot 基线**（2026-11-04 收尾）：b 槽，`boot_b` 为菜单记忆版 `492f2cdf…`，本轮 ColorOS 交接由用户确认正常；原 WildKernel、其他 payload 与 AVB 元数据保持。最新安装及恢复路径见 §19.44。
+
+**历史 Android 基线**（以下保留 11-03 与最初固化阶段的记录，不是当前 boot 哈希）（2026-11-04 起 `boot_b` 为 kShimC 镜像 `9d91e3a9666c9886a761a88401b1b760bd7bdeaeed4a19f54615796dfc30a055`，其中 ColorOS 内核与原 WildKernel 逐字节相同；原镜像 `0e5afd65…` 备份于 `~/oneplus-pad2pro-backup/slot_b/boot_b.img`，恢复用 `fastboot flash boot_b` 该文件，见 §19.39。以下为 2026-11-03 的历史记录）：ColorOS 正常启动，b 槽，`boot_b` SHA-256 当时为 `0e5afd65d6c92bb12c3a319ddcbcfc9ffaac6a68e22c567c4a6ef1cf82705e49`；用户确认解锁、指纹、Wi-Fi、KernelSU/susfs 全部正常。所有实验均为 `fastboot boot` 临时启动，未刷写分区、未改 GPT、未格式化、未刷 OEM ABL；Linux 冒烟 DT 禁用 UFS/PHY，块设备仅 loop0–7。普通重启仍进入原有 Android，尚未固化 kShim 菜单。按本轮用户“更新文档，然后提交”的要求，本方案进度与源码一并提交；原始记录和私有固件仍保留本地。
 
 ---
 
@@ -1340,6 +1342,23 @@ CRC verified; 0 bytes recovered relative to first replica
 - **灰屏一闪仍在（未解决）**：1409 生效（背光 0.290 s 探测，MDSS 推迟到 0.437 s 才停扫描输出），但用户确认仍闪灰，说明灰屏不是或不只是"停扫描输出时背光仍亮"。下一个怀疑点：主 KTZ8868 探测时 `ktz8868_power_up()` 重新拉高 HWEN 并重写 LCD 偏压（LCD_BOOST/OUTP/OUTN/BIAS_CFG1），面板仍在显示时偏压被改写；其次是 led-backlight 关灯、EFI stub/efifb 交接等时刻。需先确认灰屏相对进度条走完的确切时刻（慢动作录像）再改，1409 先保留（无副作用，且保证停输出时背光已关）。
 - **待办（用户提出）**：kShimC 菜单记住上一次的选择，避免每次重新选择。
 
+### 19.44 触屏 / GPU 修复与菜单记忆固化；灰闪未解决（2026-11-04 收尾）
+
+- **目标与顺序**：先修复触屏和桌面动画回归，再定位进度条结束后的灰屏，最后给 kShimC 增加跨重启的入口记忆。每项独立验证，不把驱动节点存在当作功能通过。
+- **只读取证**：当前设备为机内 `20261104.5f603c2.fast3`、Linux `7.2.6 #30`，没有失败服务，但根文件系统和 initramfs 都缺 `novatek/nt36536-xn242.bin`、`qcom/sm8750/erhai/gen80000_zap.mbn`。开机日志分别报触屏固件下载 `-ENOENT` 后关闭 IRQ、GPU ZAP 加载 `-ENOENT` 后硬件初始化失败。证据在忽略目录 `output/opd2413-stage4/regress1/before-{kernel,state}.txt`。这是镜像固件收录缺口；不能由 failed units=0 推定外设正常，也不能直接归咎于 1409。
+- **固件修复路线与验收**：把此前 USB overlay / 冒烟 initramfs 单独提供的触屏、GPU 固件纳入同一份经过哈希检查的镜像输入清单和早期 initramfs，增加缺失文件拒绝测试。保留旧部署，先核对镜像内容，再按 bootc 原子更新；重启后检查触屏固件就绪、GPU 硬件渲染及用户手指 / 桌面动画实测。
+- **灰屏实验路线**：在固件回归修复之后，对照背光驱动接管 ABL 已亮屏状态的 GPIO / I2C 顺序。只有找到会在灭灯前中断面板供电或改写偏压的具体操作，才准备单变量内核候选；沿用 1407 的扫描输出排空修复。
+- **入口记忆路线**：先查 kShimC 已有存储能力和本机保留区所有权；只有确定不会占用 Android 的重启原因、RTC 或固件数据，才启用持久后端。无有效记录时仍回退到 manifest 默认入口，记录需绑定入口身份，避免菜单调整后选错系统。
+- **固件修复已真机通过**：`firmware1` 镜像 `205449bc…`，OCI 包 `318ed4b1…`，部署 `291e99d1…`。同一内核 / 模块，仅补固件并重建 initramfs；SQE/GMU/AQE（含发行版的压缩 AQE）也显式收录。用户确认触屏、动画恢复，灰屏仍在。KWin 从 llvmpipe 变为 `freedreno / Adreno (TM) 830`，触屏固件 `0x1D` 在 1.616 s 首次 resume 完成；无失败服务。`regress1/after-{kernel,state}.txt` 保存机器证据。旧 `b706a22.usb3` 部署已 pin，fast3 与 firmware1 OCI 包保留在设备。
+- **灰屏独立候选 grey1（结果见下一项）**：1410 在两颗 KTZ8868 probe 时读取实际 BL_EN，完整执行全局灭灯 / 9 ms 渐灭 / 清亮度 / 清使能，失败时阻止后续偏压操作；已高 HWEN 保持原 GPIO 方向和 LCD 偏压，避免另一颗尚未 probe 的灯仍亮时改偏压。原先零初始化的 led_on=false 会跳过全局灭灯和渐灭。冷 HWEN 仍走原偏压配置。内核和 1594 个模块同次重编（#32），DTB 保持 fast3；实际函数的硬件模型覆盖主/次芯片、冷启动、灯已灭、读取/关灯失败，全部通过。独立静态审查通过，测试场景限 ABL 已点亮双灯。证据 `grey1/`。
+- **grey1 结果：真机失败（灰闪目标）**：用户确认灰闪完全不变、触屏正常。运行版本已核对为 grey1 / Linux #32；两颗芯片 0.778 s 报 BL_EN=0x77 并完成灭灯，MDSS 0.780 s 才停扫描输出。不能把“关灯命令已执行”继续当作灰闪根因证据。`grey1/after-fixed-kernel.txt` 保存日志。用户要求先处理菜单记忆，灰闪排查暂停；1410 暂不纳入 series。首次增量传输遗漏覆盖 OCI index，导致一次重复进入 firmware1；修正索引并核对 staged 版本后才得到上述 grey1 实测，重复启动不计入候选结果。
+- **入口记忆决策**：用户明确选择“上次确认的具体菜单项”，含 boot menu / USB；保存应发生在菜单确认后、payload 交接前，不能仅在 Android / Armada 启动成功后更新默认系统。SDAM 已有 Android 重启原因、RTC 等用途，不挪用归属不明的字节。早期“在 boot_b 新增可变 Blob”的方案放弃：将使 boot 分区随选择而变化，且 LUN4 单元描述符为 data_reliability=0 / write_protect=1。改为在已有 **LUN0 ARMADA FAT16 ESP** 的 `KSHIM.CHO` 连续 16 KiB 文件中保存两个对齐的 4 KiB 交替记录；不改 FAT / 目录元数据。每页绑定 manifest、分区 GUID、入口身份、序号和 CRC，失效时回退 manifest 默认。写入只允许经 GPT 主备、唯一 ESP、双 FAT、文件大小 / 完整连续链和原页快照验证的两页，FUA 后读回，随后恢复 UFS 电源模式、原队列和 Hibern8。
+- **入口记忆源码与离线验证**：`porting/oneplus-pad-2-pro/kshim/` 是后端与日志格式的唯一源码，构建 / provision / 测试说明见其 README；最小可选接口与 MMU 修复已同步到 `../kShimC`，提交 `d3d87693172783c8e986aaa7b7fb2d2b290d6217`；从这份源码重新构建得到的 4 MiB runtime 与已安装版本 SHA-256 完全一致（`89985369…`）。共享 UFS 源码仅在 `OPD2413_BOOT_CHOICE_WRITER` 构建启用专用单块写，默认 U-Boot 仍只读。实际问题包括：常规 UI 关 MMU 后配置仍存在；临时映射权限与原位执行的 shim 冲突；原厂 `/memory/reg` 中间有零长度占位；重分区后 GPT 32 项但备表仍在 `last-4`。均有离线或实机证据后修正。ASan/UBSan 测试覆盖日志逐字节损坏 / 撕裂前缀、manifest / 入口身份、完整 FAT 镜像与跨目录交叉引用、32/128 项 GPT / 不一致备表边界、UFS 精确 LUN/LBA/FUA/数据/故障；kShimC MMU 生命周期测试通过，4 MiB runtime 无未定义符号。
+- **只读与写入实测**：早期候选仅显示菜单、存储检查拒绝，未算通过。`dryrun5/decoded.log` 确认菜单前读取及非默认 Armada 确认后的模拟提交，两次 UFS 都完整恢复。`write1/decoded.log` 首次 FUA 写 slot 0、入口 1、序号 1、读回 CRC 正确；`remember1/decoded.log` 读取入口 1，`autoboot_cancelled=0`、30 s 后自动进入 Armada，用户确认。`coloros1/console.txt` 把入口 0 写入 slot 1，ColorOS 正常，用户确认。
+- **固化与最终验收**：只替换原 fast1 的 4 MiB shim，ColorOS 内核、U-Boot quiet / menu / USB、ESP Blob、AVB 元数据及 footer 均保持；整分区镜像 `492f2cdfe1ccc43ad6bdb7a2c9e8dbc592e4f46cc3811d47fb58e400258494e5`，runtime `89985369…`。Android root adb 写入 `boot_b`，`0502d0d7…` → `492f2cdf…`，整分区回读完全一致（`choice1/boot-b-write.json`）。普通重启从闪存进入菜单后选择 Armada，写入入口 1（`installed1/decoded.log`）；再普通重启不按键，读取入口 1，30 s 后自动进入 Armada（`installed_auto/decoded.log`），用户再次确认。系统 `running`、失败单元 0、KWin Adreno 830。boot menu / USB 的相同保存代码与入口身份模型已覆盖，但本轮没有单独启动这两个记忆项做实机回归。
+- **恢复与维护**：记忆数据为 `/boot/efi/KSHIM.CHO`，删除该文件可恢复 manifest 默认 ColorOS；移位 / 重建需重新 provision，文件自身有不可变的分区 / extent / nonce 标记。选择入口只改文件数据页，不改 `boot_b`；未做原厂 UFS 配置写入。回到记忆功能之前可恢复 `output/opd2413-stage4/fast1/read-boot-flash.img`（`0502d0d7…`）；原 WildKernel 完整 boot 仍在 `~/oneplus-pad2pro-backup/slot_b/boot_b.img`（`0e5afd65…`）。所有原始日志、镜像、GUID 和 provision 回执只在忽略目录 / 设备保存。灰闪失败候选归档到 `porting/oneplus-pad-2-pro/linux/experiments/`，实际函数模型保留在同级 `test_ktz8868_handoff.py`；候选不纳入内核 series，便于复现当前 grey1 运行内核而不误作修复发布。
+- **当前交接**：平板在内部 grey1 桌面，触屏 / GPU 正常，Wi-Fi SSH 可用，最新记忆为 Armada；无正在运行的设备测试，按用户“更新文档然后提交”收尾。唯一下一步（下次继续时）是灰闪精确时序取证；当前未解决项为灰闪，不是菜单记忆或触屏 / GPU。
+
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 
 | 内容 | 位置 |
@@ -1420,6 +1439,8 @@ python3 porting/oneplus-pad-2-pro/linux/decode_smoke.py \
 **最终验收门槛**：从保存的源码和明确的私有输入重新构建镜像，检查内核、模块、DTB、拓扑、UCM、固件和 initramfs 一致；使用没有现有 USB overlay/ALSA 保存状态的全新可写层临时启动，验证冷启动后 Speakers/Mic 自动出现、网页播放、音量和静音，再允许标记“镜像安装后音频可用”。内部存储安装仍须按 §20.2 I 项单独核对目标和恢复方案。源码及构建检查已按 §19.31 落地，完整安装镜像尚未重建和实机验收。
 
 ## 21. 最新验收与脱离 U 盘的机内双启动缺口（2026-11-04）
+
+> 本节保留机内安装前的验收 / 交接历史。内部部署、ESP、bootc 更新和菜单记忆后来已完成；最新状态与唯一下一步见本文顶部及 §19.44，不按下方旧“未完成”或旧“下一步”重复实施。
 
 ### 21.1 本轮提交范围与当前实机状态
 

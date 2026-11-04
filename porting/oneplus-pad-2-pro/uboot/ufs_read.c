@@ -36,6 +36,12 @@ enum { CMD_OK = 0, CMD_STATUS = 1, CMD_FAILED = -1, CMD_REFUSED = 2 };
 static uint8_t last_cdb = 0xff, last_lun = 0xff;
 /* START STOP UNIT is accepted only during an OPD_UFS_WAKE survey. */
 static int wake_enabled;
+#ifdef OPD2413_BOOT_CHOICE_WRITER
+/* Live only for the duration of the single authorized WRITE(10). */
+static const uint8_t *choice_data;
+static uint8_t choice_lun;
+static uint32_t choice_lba;
+#endif
 /* Debug hook around each doorbell (phase 0 before, 1 after); the observer
  * overrides it in CONFIG_OPD2413_UFS_TRACE builds. */
 __attribute__((weak)) void opd2413_ufs_trace(int phase, uint8_t op, uint8_t lun) { (void)phase; (void)op; (void)lun; }
@@ -162,22 +168,37 @@ static int submit(const struct opd_ufs_io *io, volatile uint8_t *dma, uint8_t lu
 		  const uint8_t *cdb, unsigned cdb_len, uint32_t xfer, struct cmd_result *r)
 {
 	volatile uint32_t *utrd = (volatile uint32_t *)dma;
+	int writing = 0;
+#ifdef OPD2413_BOOT_CHOICE_WRITER
+	writing = choice_data && lun == choice_lun && cdb_len == 10 &&
+		cdb[0] == 0x2a && cdb[1] == 8 && be32(cdb + 2) == choice_lba &&
+		!cdb[6] && !cdb[7] && cdb[8] == 1 && !cdb[9] && xfer == OPD_READ_BLOCK;
+#endif
 	if (cdb_len > 16 || !(opd2413_ufs_read_allowed(cdb, cdb_len, xfer) ||
-			      (wake_enabled && opd2413_ufs_ssu_allowed(lun, cdb, cdb_len, xfer)))) {
+			      (wake_enabled && opd2413_ufs_ssu_allowed(lun, cdb, cdb_len, xfer)) || writing)) {
 		printf("UFS_READ refused CDB %02x len %u xfer %u\n", cdb[0], cdb_len, xfer);
 		return CMD_REFUSED;
 	}
 	last_cdb = cdb[0]; last_lun = lun;
 	dma_fill(dma, 0, DATA);
 	dma_fill(dma + DATA, 0xa5, xfer);
+#ifdef OPD2413_BOOT_CHOICE_WRITER
+	if (writing) {
+		for (unsigned i = 0; i < OPD_READ_BLOCK; i += 8) {
+			uint64_t word;
+			memcpy(&word, choice_data + i, 8);
+			*(volatile uint64_t *)(dma + DATA + i) = word;
+		}
+	}
+#endif
 	dma_fill(dma + RSP, 0xa5, PRDT - RSP);
-	utrd[0] = xfer ? 0x15000000 : 0x11000000; /* UFS storage, IRQ, D2H or no data */
+	utrd[0] = writing ? 0x13000000 : xfer ? 0x15000000 : 0x11000000;
 	utrd[2] = 0xf;
 	utrd[4] = (uint32_t)(OPD_DMA_BASE + UCD);
 	utrd[5] = (uint32_t)((OPD_DMA_BASE + UCD) >> 32);
 	utrd[6] = 0x00800080; /* response at +512, 512 bytes, DWORD units */
 	utrd[7] = xfer ? 0x01000001 : 0x01000000; /* PRDT at +1024 */
-	uint8_t upiu[32] = {0x01, xfer ? 0x40 : 0, lun, 0};
+	uint8_t upiu[32] = {0x01, writing ? 0x20 : xfer ? 0x40 : 0, lun, 0};
 	put_be32(upiu + 12, xfer);
 	for (unsigned i = 0; i < cdb_len; ++i) upiu[16 + i] = cdb[i];
 	for (unsigned i = 0; i < sizeof(upiu); ++i) dma[UCD + i] = upiu[i];
@@ -586,11 +607,34 @@ int opd2413_ufs_read(struct opd_ufs_session *s, uint8_t lun, uint64_t lba, uint3
 	return 0;
 }
 
+#ifdef OPD2413_BOOT_CHOICE_WRITER
+int opd2413_ufs_write_choice(struct opd_ufs_session *s, uint8_t lun,
+                            uint32_t lba, const void *page)
+{
+	if (!s->open || s->broken || !s->choice_ready || !page ||
+	    lun != s->choice_lun ||
+	    (lba != s->choice_lba[0] && lba != s->choice_lba[1]))
+		return 1;
+	uint8_t cdb[10] = {0x2a, 8, 0, 0, 0, 0, 0, 0, 1, 0};
+	struct cmd_result result;
+	put_be32(cdb + 2, lba);
+	choice_data = page; choice_lun = lun; choice_lba = lba;
+	int ret = submit(s->io, s->dma, lun, cdb, sizeof(cdb), OPD_READ_BLOCK, &result);
+	choice_data = NULL;
+	if (ret < 0) return session_fail(s);
+	if (ret || result.residual) return 1;
+	return 0;
+}
+#endif
+
 int opd2413_ufs_close(struct opd_ufs_session *s)
 {
 	const struct opd_ufs_io *io = s->io;
 	volatile uint8_t *dma = s->dma;
 	struct opd_ufs_read_result *res = s->res;
+#ifdef OPD2413_BOOT_CHOICE_WRITER
+	s->choice_ready = 0;
+#endif
 	if (s->broken) return -1;
 	if (!s->open) return 0;
 	if (s->condition) {

@@ -1,0 +1,96 @@
+From: Armada contributors
+Subject: [PATCH] backlight: ktz8868: retire firmware LEDs before LCD bias setup
+
+The firmware leaves both LED strings enabled, but the zero-initialized
+led_on flag makes the first brightness=0 skip global-off and ramp-down.
+The master also programs LCD bias before the LED class device is registered.
+Read the actual sink enable state and shut the LEDs down before bias setup,
+including the secondary chip without an HWEN GPIO. Preserve an already-high
+HWEN and its live LCD bias: the second string may still be on. Cold HWEN
+starts retain the existing bias configuration. Propagate shutdown errors.
+
+Archived OPD2413 grey1 experiment: model and build checks passed, but the
+visible boot flash was unchanged on hardware. Kept outside patches/series.
+---
+--- a/drivers/video/backlight/ktz8866.c
++++ b/drivers/video/backlight/ktz8866.c
+@@ -117,14 +117,25 @@
+ static int ktz8868_update_brightness(struct ktz8866 *ktz,
+ 				     unsigned int brightness)
+ {
++	int ret;
++
+ 	if (brightness == 0) {
+ 		if (ktz->led_on) {
+-			ktz8866_write(ktz, KTZ8868_BL_CTRL, 0);
++			ret = ktz8866_write(ktz, KTZ8868_BL_CTRL, 0);
++			if (ret)
++				return ret;
+ 			msleep(9);
+ 		}
+-		ktz8866_set_brightness(ktz, 0);
++		ret = ktz8866_write(ktz, BL_BRT_LSB, 0);
++		if (ret)
++			return ret;
++		ret = ktz8866_write(ktz, BL_BRT_MSB, 0);
++		if (ret)
++			return ret;
+ 		if (ktz->led_on) {
+-			ktz8866_write(ktz, BL_EN, 0);
++			ret = ktz8866_write(ktz, BL_EN, 0);
++			if (ret)
++				return ret;
+ 			ktz->led_on = false;
+ 		}
+ 		return 0;
+@@ -262,17 +273,43 @@
+  */
+ static int ktz8868_power_up(struct ktz8866 *ktz)
+ {
++	unsigned int enabled;
++	bool powered = false;
+ 	int ret;
+ 
+-	if (!ktz->enable_gpio)
+-		return 0;
+-
+-	ret = gpiod_direction_output(ktz->enable_gpio, 1);
++	if (ktz->enable_gpio) {
++		ret = gpiod_get_value_cansleep(ktz->enable_gpio);
++		if (ret < 0)
++			return ret;
++		powered = ret;
++		if (!ret) {
++			ret = gpiod_direction_output(ktz->enable_gpio, 1);
++			if (ret)
++				return ret;
++			usleep_range(1000, 1500);
++		}
++	}
++
++	/* ABL can leave both LED strings on. Adopt their real state before
++	 * changing LCD bias or registering the LED: kzalloc's led_on=false
++	 * otherwise skips the global-off command and its ramp-down time.
++	 */
++	ret = regmap_read(ktz->regmap, BL_EN, &enabled);
+ 	if (ret)
+ 		return ret;
+-	usleep_range(1000, 1500);
+-
+-	if (device_property_read_bool(&ktz->client->dev,
++	ktz->led_on = !!(enabled & BL_EN_BIT);
++	ret = ktz8868_update_brightness(ktz, 0);
++	if (ret)
++		return ret;
++	dev_info(&ktz->client->dev, "boot backlight off before LCD bias setup (BL_EN=%#x)\n",
++		 enabled);
++
++	/* Keep the live bootloader bias until the panel cycles ENP/ENN.
++	 * The other LED string is on another I2C bus and may not have probed
++	 * yet, so extinguishing this chip alone does not make a bias change
++	 * invisible. A cold HWEN start still needs the normal configuration.
++	 */
++	if (!powered && device_property_read_bool(&ktz->client->dev,
+ 				      "kinetic,enable-lcd-bias")) {
+ 		ktz8866_write(ktz, LCD_BOOST_CFG, KTZ8868_LCD_BOOST_CFG_VAL);
+ 		ktz8866_write(ktz, OUTP_CFG, KTZ8868_OUTP_CFG_VAL);

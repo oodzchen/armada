@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage verified private firmware for a local OnePlus image build."""
+"""Stage verified audio, touch and GPU firmware for a local OnePlus image."""
 import argparse
 import hashlib
 from pathlib import Path
@@ -10,13 +10,18 @@ REPO = Path(__file__).resolve().parents[3]
 MANIFEST = REPO / 'system_files/usr/share/armada/firmware/oneplus-pad-2-pro.sha256'
 
 
-def prepare(source, acf, destination):
+def prepare(source, acf, destination, *, touch, gpu_zap):
+    overrides = {
+        'awinic/erhai/aw88261_acf.bin': acf,
+        'novatek/nt36536-xn242.bin': touch,
+        'qcom/sm8750/erhai/gen80000_zap.mbn': gpu_zap,
+    }
     entries = []
     for line in MANIFEST.read_text().splitlines():
         if not line or line.startswith('#'):
             continue
         digest, relative = line.split()
-        path = acf if relative == 'awinic/erhai/aw88261_acf.bin' else source / relative
+        path = overrides.get(relative, source / relative)
         if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise ValueError(f'firmware SHA-256 mismatch: {relative}')
         entries.append((path, relative))
@@ -35,11 +40,16 @@ def main():
                         help='extracted firmware root containing qcom/sm8750/erhai/')
     parser.add_argument('--aw88261-acf', type=Path, required=True,
                         help='stock ODM aw882xx_acf.bin')
+    parser.add_argument('--touch-firmware', type=Path, required=True,
+                        help='nt36536-xn242.bin extracted from stock DTBO')
+    parser.add_argument('--gpu-zap', type=Path, required=True,
+                        help='stock OnePlus signed gen80000_zap.mbn')
     parser.add_argument('--dest', type=Path,
                         default=REPO / 'system_files/usr/lib/firmware')
     args = parser.parse_args()
     try:
-        count = prepare(args.firmware_dir, args.aw88261_acf, args.dest)
+        count = prepare(args.firmware_dir, args.aw88261_acf, args.dest,
+                        touch=args.touch_firmware, gpu_zap=args.gpu_zap)
     except (OSError, ValueError) as error:
         parser.exit(1, f'{error}\n')
     print(f'Staged {count} verified firmware files in {args.dest}')
