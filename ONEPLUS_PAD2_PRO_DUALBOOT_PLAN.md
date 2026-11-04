@@ -14,7 +14,7 @@
 | 四：Armada 设备移植与 USB 试启动 | 完整系统已进入桌面/游戏模式；显示、触控、磁吸键盘、触控板、Wi-Fi 和桌面音频已实测。配套内核/1594 模块及 USB 持久层工作；1408 音频源码、拓扑和 UCM 已纳入构建，服务失败项已清零 | 完整新镜像/全新可写层冷启动；逐颗扬声器、麦克风增益和开机 APM 超时；挂起恢复与长期稳定性 |
 | 五：安装与固化双启动 | 部分：kShimC 菜单已固化到 `boot_b`，但 Linux 启动文件仍内嵌在 boot、根文件系统仍在 U 盘 | 内部 ESP/根/数据布局、最终 boot（不再内嵌 ESP）、升级/恢复方案及多轮双系统启动回归 |
 
-**下一项工作**：Armada 已从内部 UFS 启动（§19.41），Android 已清除数据并恢复（§19.42）；接下来做两系统冷启动、Armada 更新/回滚与外设回归。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
+**下一项工作**：Armada 已从内部 UFS 启动（§19.41），Android 已清除数据并恢复（§19.42）；启动提速、进度条和首次机内更新（fast3）已完成（§19.43）。接下来：查清剩余灰屏一闪、kShimC 记住上次选择、实际启动一次回滚项，再做两系统冷启动与外设回归。独立镜像与全新可写层验收已完成（§19.39）；机内双启动的关键缺口和完整剩余清单见第21节。
 
 **剩余工作量**主要在：从源码完整重建新镜像并完成全新可写层/冷启动回归、其余外设和休眠稳定性、内部存储与 ESP 布局、双启动固化及升级/恢复方案。桌面/游戏模式、USB 根文件系统和 Wi-Fi 已有实测记录，不再列为尚未启动。erhai 驱动可继续借鉴，但不运行其重新分区/刷写安装脚本。目前没有可靠的完成百分比估计。
 
@@ -1324,6 +1324,21 @@ CRC verified; 0 bytes recovered relative to first replica
 - 应用（`userdata-backup/restore_apps.py`）：备份中 `/data/app` 下的 APK 用 `install-multiple -r -d` 装回，CE/DE 数据还原（不还原旧 `lib` 链接），chown 到新 uid、cache/code_cache 用 cache gid；本机 `restorecon -RF` 不计算应用 MLS 分类，改用包管理器给新目录的标签对整棵树 `chcon`。外部数据 `Android/data/<pkg>` 用 uid:1078。56 个成功、0 失败（KernelSU 管理器与「备份与恢复」按计划跳过）。内部存储个人文件以 `adb push` 写入 /sdcard。
 - 大文件：首次一次性 `adb push` Droidspaces 包（约 140 MB/s）在 51.8 GB 时平板卡死黑屏，强制重启后无 pstore 线索，部分文件前缀哈希与源一致。改为 2 GiB 分块追加、块间暂停并按 CPU/主板/外壳与电池温度（PMIC 传感器空闲即超 50°C，不计）限流，未再出问题；解包实际 1–2 分钟完成。Droidspaces 6 个文件（含 128 GB 稀疏 rootfs.img，`67f59205…`）与 DroidDeck 129614 个文件逐一哈希一致。`find -exec +` 对十余万文件 chcon 会超过参数上限，改用 `xargs -0 -n 200`。/data 已用 143 GB、余 61 GB。
 - 无法恢复：指纹、锁屏、Keystore 密钥及各账号登录状态需用户重设；需要 root 的应用须在 KernelSU 中重新授权。
+
+### 19.43 启动画面、Armada 启动提速与首次机内更新（fast1/fast3，2026-11-04）
+
+- **实测基线**（ins1，内部 Armada `systemd-analyze`）：firmware 13.9 s（含 ABL、kShimC 菜单等待、U-Boot）+ **loader 24.0 s** + kernel 0.6 s + initrd 2.2 s + userspace 6.3 s。loader = systemd-boot 3 s 倒计时 + 读取 ESP 上 64 MB vmlinuz 与 84 MB initramfs + 2.5 s 停顿。
+- **原因（QEMU + 设备 ESP 只读拷贝复现）**：①红字是 systemd-boot 启动 `\EFI\systemd\drivers\dtbloaderaa64.efi` 失败（dtbloader 不认识本机，返回 Unsupported）；systemd 259 只要记过错误，启动内核前 `log_wait()` 停 2.5 s。②U-Boot 日志、灰屏一闪和黑屏是 3392×2400 vidconsole 在 Normal-NC 帧缓冲上滚屏/清屏/绘制菜单，很慢。③UFS 读取每条 READ(10) 56 KiB，DMA 窗口为 Normal-NC，清零/预填/拷出全是逐字节访问，约 8 ms/条、~7 MB/s，148 MB 约 18–20 s。④3 s 倒计时来自 armada-efi-update 只写一次的 `loader.conf`（`timeout 3`），回滚要靠这个菜单里的 `(Rollback)` 项（目前只有一个部署，菜单里尚无该项）。
+- **改动**：kShimC `debug_mark.c` 色块改为顶部 16 行进度条（白/深灰；成功检查点不画，失败检查点在条下方画色标；菜单出现后不再画，选择后继续；`CONFIG_KSHIM_DEBUG_MARK_PROGRESS_END=20`，到交接时填满 20%）。U-Boot `--boot-mode quiet`：stdout 只到 RAM console、关 U-Boot logo，进度条从 20% 续画（找到 ESP 30%、DTB 35%、systemd-boot 40%，之后按读盘字节逼近 95%，ExitBootServices 100%），`opd_loader_timeout menu-disabled` 以易失 EFI 变量 `LoaderConfigTimeout` 覆盖 loader.conf，不显示菜单也不等按键；失败时 `run v` 把日志显示到屏幕并 8 秒后回 Android。`--boot-mode menu`：`LoaderConfigTimeoutOneShot=menu-force`，菜单无倒计时（回滚入口）。`ufs_read.c` 改为 64 位读写 DMA 窗口（命令、窗口、白名单不变；新增非对齐目标缓冲测试）。dtbloader 构建加 `ABORT_IF_UNSUPPORTED=1`（上游为发行版提供的选项：未识别设备返回 EFI_ABORTED，systemd-boot 不报错不停顿；需随下一次镜像构建与更新生效）。
+- **验证**：主机测试（含 ufs_read 非对齐读取）通过；QEMU（设备 ESP 拷贝）quiet 不出菜单直接 ExitBootServices，帧缓冲只有顶部 16 行进度条；menu 显示菜单且无 "Boot in"；旧分区表（无 ARMADA）EL1/EL2 显示失败信息并回 Android；合成 ESP 正向 EL1/EL2 PASS。
+- **fast1**（`output/opd2413-stage4/fast1/prepare-boot.py`）：kShimC 菜单 ColorOS（默认）/ Armada（quiet）/ Armada boot menu / Armada USB disk；ColorOS 内核、USB U-Boot、ESP Blob 与 ins1 逐字节相同；boot 90.8 MiB，余 5.4 MB，vbmeta 已迁移。
+- **实机**：fastboot 临时启动三项均通过（Armada 直接进桌面、loader **24.0 s → 1.685 s**；ColorOS 正常；Armada boot menu 无倒计时，选择后进桌面）。用户批准后经 USB adb 在 Android 中写入 `boot_b`（`4e307868…` → `0502d0d7…`，整分区回读一致，`fast1/boot-b-write.json`），重启后从闪存进入 ColorOS 正常。用户要求 Armada 开机进桌面：设备上 `/etc/systemd/system/armada-session-default.service.d/10-desktop.conf` 把每次开机的 `session-control default-gamemode` 改为 `default-desktop`（镜像默认仍为游戏模式）。
+- **剩余灰屏一闪**：内核 0.325 s 时 1407 停掉 ABL 扫描输出，KTZ8868 背光仍为 ABL 亮度，直到约 0.37 s led-backlight 探测并关背光，其间液晶无信号显示灰色。新增内核补丁 **1409**：MDSS 探测先等待面板背光注册并关闭背光再停扫描输出（未注册时 -EPROBE_DEFER，开机 10 s 后照旧继续并告警），面板首帧时再开背光；仅 oneplus,erhai + sm8750-mdss。1407+1409 在 clean-series 上重放与编译树逐字节一致。
+- **fast2 镜像**（`output/opd2413-stage4/fast2/`）：armada20 同一基础层与步骤，内核包 `7c6d84fa…`（audio1 树仅改 msm_mdss.c，内核与 1594 个模块同次构建，DTB 复制自 `2fc21ced…`），dtbloader 1.5.5-2（`ABORT_IF_UNSUPPORTED`，QEMU 用设备 ESP 验证无红字）；镜像 `70f2c079…`，版本 `20261104.5f603c2.fast2`，OCI 包 `1f888d77…`（8.0 GB）。机内更新方式：替换部署来源 `/var/lib/armada/opd2413/armada.ociarchive` 后 `bootc upgrade`，旧部署保留为 `(Rollback)`。
+- **首次机内更新被自动回滚**：fast2 经 `bootc upgrade` 暂存后，关机时 `armada-bootimg-update`（为 OpenABL 生成 ESP `/KERNEL`）因拼出的 cmdline 534 B 超过 boot.img 512 B 上限失败，`armada-bootimg-finalize` 按设计 `bootc rollback`，重启仍为 b706a22。此前每次开机的同步也在失败（ExecStart 带 `-` 被忽略）。本机 `ARMADA_ABL_MANAGED=0`、从不读 `/KERNEL`：`armada-boot-update` 改为在 device-env 报告 `ARMADA_ABL_MANAGED=0` 时跳过 ABL 同步、仍做 EFI 同步（device-env 不可用时照旧同步）；`tests/boot-sync-test.sh` 增加两种情况并通过，shellcheck 通过。关机时执行的是旧部署的脚本，因此该次更新在 `/run/systemd/system/{ostree-finalize-staged,armada-bootimg-sync}.service.d/` 放一次性 `Environment=BOOTIMG=/usr/bin/true`（重启即消失）。
+- **fast3**（同 fast2 + 上述脚本修正，镜像 `e8d5c29b…`，OCI 包 `eaa4525d…`）：更新成功，机内启动 `20261104.5f603c2.fast3`，`running`、失败单元 0，仍进桌面；ESP 为 "Armada" 与 "Armada (Rollback)"（b706a22.usb3），dtbloader 为新版本 `86dd5c64…`，loader 1.687 s，本次开机同步显示 `skipping /KERNEL`。旧 OCI 包保留为 `/var/lib/armada/opd2413/armada-b706a22-usb3.ociarchive`。回滚项尚未实际启动验证。
+- **灰屏一闪仍在（未解决）**：1409 生效（背光 0.290 s 探测，MDSS 推迟到 0.437 s 才停扫描输出），但用户确认仍闪灰，说明灰屏不是或不只是"停扫描输出时背光仍亮"。下一个怀疑点：主 KTZ8868 探测时 `ktz8868_power_up()` 重新拉高 HWEN 并重写 LCD 偏压（LCD_BOOST/OUTP/OUTN/BIAS_CFG1），面板仍在显示时偏压被改写；其次是 led-backlight 关灯、EFI stub/efifb 交接等时刻。需先确认灰屏相对进度条走完的确切时刻（慢动作录像）再改，1409 先保留（无副作用，且保证停输出时背光已关）。
+- **待办（用户提出）**：kShimC 菜单记住上一次的选择，避免每次重新选择。
 
 ### 19.5 最新产物和复查入口（第四轮；第五轮见 19.6）
 
