@@ -344,5 +344,6 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 1405-drm-msm-dsi-report-stalled-command-transfers.patch
 1406-drm-msm-retire-opd2413-firmware-fetch-before-iommu.patch
 1407-drm-msm-mdss-retire-opd2413-boot-scanout-before-reset.patch
+1409-drm-msm-mdss-turn-opd2413-backlight-off-before-scanout-retire.patch
 # OPD2413 AudioReach legacy TDM and six AW88261 amplifiers
 1408-ASoC-qcom-add-opd2413-tdm-audio.patch

@@ -7,6 +7,9 @@ trap 'rm -rf "${work}"' EXIT
 export TRACE=${work}/trace SYNC_LOCK=${work}/sync.lock
 export BOOTIMG=${work}/bootimg EFIUPDATE=${work}/efi BOOTC=${work}/bootc
 export UPDATE=${ROOT}/system_files/usr/libexec/armada/armada-boot-update
+export ARMADA_DEVICE_ENV=${work}/device-env
+printf '#!/bin/sh\necho ARMADA_ABL_MANAGED=${MANAGED:-1}\n' > "${ARMADA_DEVICE_ENV}"
+chmod +x "${ARMADA_DEVICE_ENV}"
 for name in bootimg efi; do
     cat > "${work}/${name}" <<'EOF'
 #!/bin/bash
@@ -54,3 +57,19 @@ FAIL=bootimg FAIL_ROLLBACK=1 "${ROOT}/system_files/usr/libexec/armada/armada-boo
 [ "${status}" = 23 ]
 printf 'bootimg \nrollback\n' > "${work}/expected"
 cmp "${work}/expected" "${TRACE}"
+
+# Vendor-ABL devices (ARMADA_ABL_MANAGED=0) never read /KERNEL: skip it, so
+# its failure cannot roll an update back; the EFI sync still runs.
+: > "${TRACE}"
+rm -f "${TRACE}.rolled-back"
+MANAGED=0 FAIL=bootimg "${ROOT}/system_files/usr/libexec/armada/armada-bootimg-finalize" > "${work}/out"
+grep -Fq 'skipping /KERNEL' "${work}/out"
+printf 'efi \n' > "${work}/expected"
+cmp "${work}/expected" "${TRACE}"
+# A failing device-env keeps the ABL sync.
+printf '#!/bin/sh\nexit 1\n' > "${ARMADA_DEVICE_ENV}"
+: > "${TRACE}"
+"${UPDATE}"
+printf 'bootimg \nefi \n' > "${work}/expected"
+cmp "${work}/expected" "${TRACE}"
+echo "PASS: boot sync order, rollback, vendor-ABL skip"

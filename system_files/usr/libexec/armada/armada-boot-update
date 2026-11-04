@@ -6,6 +6,18 @@ trap 'status=$?; echo "armada-boot-update: ${step} failed (status ${status})" >&
 exec 8>"${SYNC_LOCK:-/run/armada-boot-sync.lock}"
 flock -w 30 8
 step='ABL boot sync'
-"${BOOTIMG:-/usr/libexec/armada/armada-bootimg-update}"
+# Devices that keep the vendor ABL (ARMADA_ABL_MANAGED=0, the OnePlus Pad 2
+# Pro) boot Armada through EFI only and never read the ESP /KERNEL image. On
+# them its failures (e.g. a command line over the 512-byte boot.img limit)
+# would roll every update back. Without a device profile, keep syncing.
+abl_managed=1
+if assignments=$("${ARMADA_DEVICE_ENV:-/usr/libexec/armada/device-env}" 2>/dev/null); then
+    abl_managed=$(eval "${assignments}" && printf '%s' "${ARMADA_ABL_MANAGED:-1}") || abl_managed=1
+fi
+if [ "${abl_managed}" = 0 ]; then
+    echo "armada-boot-update: ABL keeps its vendor boot path here (ARMADA_ABL_MANAGED=0); skipping /KERNEL"
+else
+    "${BOOTIMG:-/usr/libexec/armada/armada-bootimg-update}"
+fi
 step='EFI boot sync'
 "${EFIUPDATE:-/usr/libexec/armada/armada-efi-update}"

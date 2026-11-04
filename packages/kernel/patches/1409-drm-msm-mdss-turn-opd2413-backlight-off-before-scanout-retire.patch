@@ -1,0 +1,94 @@
+From: Armada contributors
+Subject: [PATCH] drm/msm/mdss: turn the OPD2413 backlight off before retiring the boot scanout
+
+1407 retires the bootloader scanout before the MDSS core reset. From that
+moment the LCD has no video stream, while the KTZ8868 backlight still runs
+at the bootloader's level until led-backlight probes and switches it off
+(0.325 s against 0.37 s on this board): the screen flashes grey for those
+tens of milliseconds.
+
+Before the retire, look up the panel's backlight. If it is not registered
+yet, defer the MDSS probe, so the retire happens with the backlight off;
+the panel enables it again with the first frame. A board without the
+backlight in 10 s of uptime proceeds as before, with a warning.
+
+Limited to oneplus,erhai + qcom,sm8750-mdss, like 1407.
+
+On hardware the retire now follows the backlight probe and the display
+comes up normally, but a grey flash is still visible: it has another or an
+additional cause, still being traced.
+---
+diff --git a/drivers/gpu/drm/msm/msm_mdss.c b/drivers/gpu/drm/msm/msm_mdss.c
+--- a/drivers/gpu/drm/msm/msm_mdss.c
++++ b/drivers/gpu/drm/msm/msm_mdss.c
+@@ -3,6 +3,7 @@
+  * Copyright (c) 2018, The Linux Foundation
+  */
+ 
++#include <linux/backlight.h>
+ #include <linux/bitfield.h>
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+@@ -738,10 +739,49 @@
+ 	mdss_boot_handoff_put(h);
+ }
+ 
++/*
++ * Once the bootloader scanout is retired the panel loses its video stream,
++ * and with the backlight still at the bootloader's level the LCD shows grey
++ * until the backlight driver probes and turns it off, about 40 ms later on
++ * the OPD2413. Wait for the panel's backlight and switch it off first; the
++ * panel enables it again with the first frame. After 10 s of uptime the
++ * retire goes ahead without it, as before.
++ */
++static int mdss_boot_backlight_off(struct device *dev)
++{
++	if (!of_device_is_compatible(dev->of_node, "qcom,sm8750-mdss") ||
++	    !of_machine_is_compatible("oneplus,erhai"))
++		return 0;
++
++	for_each_available_child_of_node_scoped(dev->of_node, host) {
++		for_each_available_child_of_node_scoped(host, panel) {
++			struct device_node *np = of_parse_phandle(panel, "backlight", 0);
++			struct backlight_device *bl;
++
++			if (!np)
++				continue;
++			bl = of_find_backlight_by_node(np);
++			of_node_put(np);
++			if (!bl) {
++				if (ktime_get_boottime_seconds() < 10)
++					return dev_err_probe(dev, -EPROBE_DEFER,
++							     "waiting for the panel backlight\n");
++				dev_warn(dev, "panel backlight missing, retiring the bootloader scanout with it on\n");
++				return 0;
++			}
++			backlight_disable(bl);
++			put_device(&bl->dev);
++			return 0;
++		}
++	}
++	return 0;
++}
++
+ static int msm_mdss_reset(struct device *dev)
+ {
+ 	struct mdss_boot_handoff handoff = {};
+ 	struct reset_control *reset;
++	int ret;
+ 
+ 	reset = reset_control_get_optional_exclusive(dev, NULL);
+ 	if (!reset) {
+@@ -752,6 +792,12 @@
+ 				     "failed to acquire mdss reset\n");
+ 	}
+ 
++	ret = mdss_boot_backlight_off(dev);
++	if (ret) {
++		reset_control_put(reset);
++		return ret;
++	}
++
+ 	mdss_boot_handoff_begin(dev, &handoff);
+ 	reset_control_assert(reset);
+ 	/*

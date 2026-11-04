@@ -3,7 +3,7 @@
 
 Name:           dtbloader
 Version:        0
-Release:        1%{?dist}.armada
+Release:        2%{?dist}.armada
 Summary:        EFI driver that installs a devicetree for the running device
 
 # dtbloader itself is BSD-3-Clause but it bundles projects with other licenses.
@@ -25,7 +25,10 @@ UEFI configuration table, for platforms whose firmware does not provide one.
 %autosetup
 
 %build
-%make_build ARCH=aarch64
+# On a device it does not know (e.g. one whose firmware already passes a
+# devicetree), return EFI_ABORTED instead of EFI_UNSUPPORTED: systemd-boot
+# then skips the red "Failed to start image" error and its 2.5 s pause.
+%make_build ARCH=aarch64 ABORT_IF_UNSUPPORTED=1
 
 %install
 install -Dpm 0644 build-aarch64/dtbloader.efi %{buildroot}%{_prefix}/lib/dtbloader/dtbloaderaa64.efi
